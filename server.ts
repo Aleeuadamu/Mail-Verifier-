@@ -1,5 +1,4 @@
 import express from "express";
-import { createServer as createViteServer } from "vite";
 import path from "path";
 import { google } from "googleapis";
 import cookieSession from "cookie-session";
@@ -12,14 +11,20 @@ dotenv.config();
 const app = express();
 const PORT = 3000;
 
-const ai = new GoogleGenAI({ 
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build'
-    }
+let ai: GoogleGenAI | null = null;
+function getAiClient() {
+  if (!ai) {
+    ai = new GoogleGenAI({ 
+      apiKey: process.env.GEMINI_API_KEY,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build'
+        }
+      }
+    });
   }
-});
+  return ai;
+}
 const SYSTEM_INSTRUCTION = `
 You are Mail Verifier AI, a real-time email security assistant embedded inside a mobile and web application.
 You operate as part of a full system that continuously scans user emails after secure OAuth permission.
@@ -300,7 +305,7 @@ Clear next step for user
       while (attempts < maxAttempts && !success) {
         try {
           console.log(`Analyzing email with model: ${model} (attempt ${attempts + 1}/${maxAttempts})`);
-          const response = await ai.models.generateContent({
+          const response = await getAiClient().models.generateContent({
             model: model,
             contents: [{ parts: [{ text: prompt }] }],
             config: {
@@ -385,7 +390,7 @@ NEW USER QUESTION: ${question}
 
     for (const model of modelsToTry) {
       try {
-        const response = await ai.models.generateContent({
+        const response = await getAiClient().models.generateContent({
           model: model,
           contents: prompt,
           config: {
@@ -415,11 +420,16 @@ NEW USER QUESTION: ${question}
 // Start Server with Vite
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
+    try {
+      const viteModule = await import("vite");
+      const vite = await viteModule.createServer({
+        server: { middlewareMode: true },
+        appType: "spa",
+      });
+      app.use(vite.middlewares);
+    } catch (e) {
+      console.warn("Vite not found, skipping dev middleware");
+    }
   } else {
     // Check if we are running in a Vercel serverless environment
     // Vercel handles static files on its own, so we only need Express for `/api`
