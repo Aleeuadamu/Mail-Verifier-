@@ -119,7 +119,7 @@ export default function App() {
     headers: "",
   });
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [result, setResult] = useState<string | null>(null);
+  const [result, setResult] = useState<any | null>(null);
   const [view, setView] = useState<
     | "login"
     | "inbox"
@@ -162,6 +162,7 @@ export default function App() {
   const [composeTo, setComposeTo] = useState("");
   const [composeSubject, setComposeSubject] = useState("");
   const [composeBody, setComposeBody] = useState("");
+  const [composeQuote, setComposeQuote] = useState("");
   const [composeAttachments, setComposeAttachments] = useState<
     { name: string; type: string; data: string }[]
   >([]);
@@ -535,10 +536,10 @@ export default function App() {
     setIsAnalyzing(true);
     try {
       const output = await analyzeEmail(dataToAnalyze, "SINGLE_EMAIL_VIEW");
-      setResult(typeof output === "string" ? output : "No analysis generated.");
+      setResult(output);
     } catch (error) {
       console.error(error);
-      setResult("Analysis failed.");
+      setResult(null);
     } finally {
       setIsAnalyzing(false);
     }
@@ -705,7 +706,7 @@ export default function App() {
         body: JSON.stringify({
           to: composeTo,
           subject: composeSubject,
-          body: composeBody,
+          body: composeQuote ? composeBody + "\n\n" + composeQuote : composeBody,
           attachments: composeAttachments,
         }),
       });
@@ -716,6 +717,7 @@ export default function App() {
         setComposeTo("");
         setComposeSubject("");
         setComposeBody("");
+        setComposeQuote("");
         setComposeAttachments([]);
         setTimeout(() => {
           setView("inbox");
@@ -2277,8 +2279,9 @@ export default function App() {
                                       setComposeSubject(
                                         `Re: ${formData.subject}`,
                                       );
-                                      setComposeBody(
-                                        `\n\n> On ${new Date().toLocaleDateString()}, ${formData.senderName} wrote:\n> ${formData.body.split("\n").join("\n> ")}`,
+                                      setComposeBody("");
+                                      setComposeQuote(
+                                        `> On ${new Date().toLocaleDateString()}, ${formData.senderName} wrote:\n> ${formData.body.split("\n").join("\n> ")}`
                                       );
                                       setShowMsgOptions(false);
                                       setView("compose");
@@ -2294,8 +2297,9 @@ export default function App() {
                                       setComposeSubject(
                                         `Fwd: ${formData.subject}`,
                                       );
-                                      setComposeBody(
-                                        `\n\n---------- Forwarded message ---------\nFrom: ${formData.senderName} <${formData.senderEmail}>\nSubject: ${formData.subject}\n\n${formData.body}`,
+                                      setComposeBody("");
+                                      setComposeQuote(
+                                        `---------- Forwarded message ---------\nFrom: ${formData.senderName} <${formData.senderEmail}>\nSubject: ${formData.subject}\n\n${formData.body}`
                                       );
                                       setShowMsgOptions(false);
                                       setView("compose");
@@ -2307,9 +2311,11 @@ export default function App() {
                                   </button>
                                   <button
                                     onClick={() => {
-                                      alert(
-                                        "Unsubscribe request initiated and synced.",
-                                      );
+                                      if (window.confirm("Are you sure you want to unsubscribe from this sender?")) {
+                                        alert(
+                                          "Unsubscribe request initiated and synced.",
+                                        );
+                                      }
                                       setShowMsgOptions(false);
                                     }}
                                     className="w-full text-left px-4 py-2 text-xs font-bold uppercase tracking-widest text-navy hover:bg-navy/5 flex items-center gap-2"
@@ -2320,16 +2326,18 @@ export default function App() {
                                   <div className="h-px bg-navy/5 my-1" />
                                   <button
                                     onClick={() => {
-                                      alert(
-                                        "Message permanently deleted and synced to account.",
-                                      );
-                                      setInbox(
-                                        inbox.filter(
-                                          (m) => m.id !== (formData as any).id,
-                                        ),
-                                      );
+                                      if (window.confirm("Are you sure you want to delete this message?")) {
+                                        alert(
+                                          "Message permanently deleted and synced to account.",
+                                        );
+                                        setInbox(
+                                          inbox.filter(
+                                            (m) => m.id !== (formData as any).id,
+                                          ),
+                                        );
+                                        setView("inbox");
+                                      }
                                       setShowMsgOptions(false);
-                                      setView("inbox");
                                     }}
                                     className="w-full text-left px-4 py-2 text-xs font-bold uppercase tracking-widest text-red-500 hover:bg-red-50 flex items-center gap-2"
                                   >
@@ -2409,91 +2417,114 @@ export default function App() {
                             <Fingerprint className="w-24 h-24 rotate-12" />
                           </div>
                           <div className="flex justify-between items-center text-[10px] font-black uppercase tracking-[4px] opacity-60">
-                            <span>Security Quotient</span>
+                            <span>Threat / Trust Score</span>
                             <ShieldAlert className="w-4 h-4" />
                           </div>
-                          <div className="text-8xl font-display font-black italic tracking-tighter leading-none">
-                            {result?.match(/Likelihood: (\d+)/)?.[1] || "—"}
+                          <div className="text-8xl font-display font-black italic tracking-tighter leading-none flex gap-8 items-end">
+                            <div>
+                               <span className="text-sm uppercase font-black opacity-50 block mb-2">Threat</span>
+                               {result?.ai_risk_engine?.threat_score || "0"}
+                            </div>
+                            <div className="text-4xl text-navy/40">/</div>
+                            <div>
+                               <span className="text-sm uppercase font-black opacity-50 block mb-2">Trust</span>
+                               {result?.ai_risk_engine?.trust_score || "0"}
+                            </div>
                           </div>
                           <div className="flex justify-between items-end pt-4 border-t border-navy/10">
                             <span className="text-xs font-black uppercase tracking-widest">
-                              {result?.match(
-                                /### (?:📨\s*)?Email Classification\n(.+)/,
-                              )?.[1] || "ANALYZED"}
+                              {result?.ai_risk_engine?.final_risk_classification || "ANALYZED"}
                             </span>
                             <span className="text-[10px] font-bold uppercase opacity-60">
-                              Magnitude: {result?.match(/Severity: (.+)/)?.[1]}
+                              Confidence: {result?.ai_risk_engine?.confidence_score || "—"}%
                             </span>
                           </div>
                         </div>
 
                         {/* Analysis Content */}
-                        <div className="p-1 px-2 space-y-8">
-                          <div className="markdown-container text-navy/80">
-                            <ReactMarkdown
-                              remarkPlugins={[remarkGfm]}
-                              components={{
-                                h3: ({ ...props }) => (
-                                  <h3
-                                    className="text-xl font-display font-black uppercase tracking-tighter text-orange mb-6 mt-10 first:mt-0 italic"
-                                    {...props}
-                                  />
-                                ),
-                                h4: ({ ...props }) => (
-                                  <h4
-                                    className="text-sm font-black uppercase tracking-widest text-navy/60 mb-4 mt-8 flex items-center gap-2 before:w-4 before:h-[2px] before:bg-orange"
-                                    {...props}
-                                  />
-                                ),
-                                p: ({ ...props }) => (
-                                  <p
-                                    className="text-sm leading-relaxed mb-6 font-medium text-navy/80"
-                                    {...props}
-                                  />
-                                ),
-                                ul: ({ ...props }) => (
-                                  <ul className="space-y-3 mb-6" {...props} />
-                                ),
-                                li: ({ ...props }) => (
-                                  <li className="text-xs flex gap-3 text-navy/70">
-                                    <span className="w-1.5 h-1.5 bg-orange rounded-full mt-1.5 flex-shrink-0" />
-                                    <span {...props} />
-                                  </li>
-                                ),
-                                blockquote: ({ node, ...props }) => (
-                                  <blockquote
-                                    className="bg-navy/[0.03] p-6 rounded-3xl border-l-4 border-orange italic text-sm mb-6 text-navy"
-                                    {...props}
-                                  />
-                                ),
-                                table: ({ ...props }) => (
-                                  <div className="overflow-x-auto my-6 rounded-2xl border border-navy/10 bg-white shadow-sm">
-                                    <table
-                                      className="w-full text-[10px] text-left text-navy"
-                                      {...props}
-                                    />
+                        <div className="space-y-6">
+                            {/* Summary Markdown */}
+                            {result?.summary_markdown && (
+                                <div className="bg-navy/[0.03] p-8 rounded-[3rem] border border-navy/10 markdown-container text-navy/80">
+                                <ReactMarkdown
+                                  remarkPlugins={[remarkGfm]}
+                                  components={{
+                                    h3: ({ ...props }) => (
+                                      <h3 className="text-xl font-display font-black uppercase tracking-tighter text-orange mb-6 mt-10 first:mt-0 italic" {...props} />
+                                    ),
+                                    h4: ({ ...props }) => (
+                                      <h4 className="text-sm font-black uppercase tracking-widest text-navy/60 mb-4 mt-8 flex items-center gap-2 before:w-4 before:h-[2px] before:bg-orange" {...props} />
+                                    ),
+                                    p: ({ ...props }) => <p className="text-sm leading-relaxed mb-6 font-medium text-navy/80" {...props} />,
+                                    ul: ({ ...props }) => <ul className="space-y-3 mb-6" {...props} />,
+                                    li: ({ ...props }) => (
+                                      <li className="text-xs flex gap-3 text-navy/70">
+                                        <span className="w-1.5 h-1.5 bg-orange rounded-full mt-1.5 flex-shrink-0" />
+                                        <span {...props} />
+                                      </li>
+                                    ),
+                                  }}
+                                >
+                                  {result.summary_markdown}
+                                </ReactMarkdown>
+                                </div>
+                            )}
+
+                            {/* Complex Data Grid */}
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                               <div className="bg-white border border-navy/10 p-6 rounded-3xl space-y-4">
+                                  <div className="flex items-center gap-3 pb-3 border-b border-navy/5">
+                                    <Globe className="text-orange w-5 h-5"/>
+                                    <h4 className="font-black text-xs uppercase tracking-widest">Location Intel</h4>
                                   </div>
-                                ),
-                                thead: ({ ...props }) => (
-                                  <thead
-                                    className="bg-navy/5 text-orange font-black uppercase"
-                                    {...props}
-                                  />
-                                ),
-                                th: ({ ...props }) => (
-                                  <th className="px-4 py-3" {...props} />
-                                ),
-                                td: ({ ...props }) => (
-                                  <td
-                                    className="px-4 py-3 border-t border-navy/5 font-bold"
-                                    {...props}
-                                  />
-                                ),
-                              }}
-                            >
-                              {result || ""}
-                            </ReactMarkdown>
-                          </div>
+                                  <div className="space-y-3">
+                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">IP Address</span><span className="text-xs font-mono font-bold truncate max-w-[150px]">{result?.location_intelligence?.ip_address || "N/A"}</span></div>
+                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Country</span><span className="text-xs font-mono font-bold truncate max-w-[150px]">{result?.location_intelligence?.country || "N/A"}</span></div>
+                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">City</span><span className="text-xs font-mono font-bold truncate max-w-[150px]">{result?.location_intelligence?.city || "N/A"}</span></div>
+                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">ISP / ASN</span><span className="text-xs font-mono font-bold truncate max-w-[150px]">{result?.location_intelligence?.isp || "N/A"}</span></div>
+                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">VPN / Proxy</span><span className={cn("text-xs font-black uppercase tracking-widest", (result?.location_intelligence?.vpn_detected || result?.location_intelligence?.proxy_detected) ? "text-red-500" : "text-green-500")}>{(result?.location_intelligence?.vpn_detected || result?.location_intelligence?.proxy_detected) ? "DETECTED" : "CLEAN"}</span></div>
+                                  </div>
+                               </div>
+
+                               <div className="bg-white border border-navy/10 p-6 rounded-3xl space-y-4">
+                                  <div className="flex items-center gap-3 pb-3 border-b border-navy/5">
+                                    <Lock className="text-orange w-5 h-5"/>
+                                    <h4 className="font-black text-xs uppercase tracking-widest">Auth Analysis</h4>
+                                  </div>
+                                  <div className="space-y-3">
+                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">SPF</span><span className={cn("text-[10px] uppercase font-black px-2 py-1 rounded-full", String(result?.authentication_analysis?.spf_validation || "").includes("PASS") || String(result?.authentication_analysis?.spf_validation || "").includes("true") || result?.authentication_analysis?.spf_validation === true ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700")}>{String(result?.authentication_analysis?.spf_validation || "N/A")}</span></div>
+                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">DKIM</span><span className={cn("text-[10px] uppercase font-black px-2 py-1 rounded-full", String(result?.authentication_analysis?.dkim_validation || "").includes("PASS") || String(result?.authentication_analysis?.dkim_validation || "").includes("true") || result?.authentication_analysis?.dkim_validation === true ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700")}>{String(result?.authentication_analysis?.dkim_validation || "N/A")}</span></div>
+                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">DMARC</span><span className={cn("text-[10px] uppercase font-black px-2 py-1 rounded-full", String(result?.authentication_analysis?.dmarc_validation || "").includes("PASS") || String(result?.authentication_analysis?.dmarc_validation || "").includes("true") || result?.authentication_analysis?.dmarc_validation === true ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700")}>{String(result?.authentication_analysis?.dmarc_validation || "N/A")}</span></div>
+                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Domain Align</span><span className={cn("text-[10px] uppercase font-black", result?.authentication_analysis?.domain_alignment ? "text-green-500" : "text-red-500")}>{result?.authentication_analysis?.domain_alignment ? "TRUE" : "FALSE"}</span></div>
+                                  </div>
+                               </div>
+
+                               <div className="bg-white border border-navy/10 p-6 rounded-3xl space-y-4">
+                                  <div className="flex items-center gap-3 pb-3 border-b border-navy/5">
+                                    <Fingerprint className="text-orange w-5 h-5"/>
+                                    <h4 className="font-black text-xs uppercase tracking-widest">Sender Identity</h4>
+                                  </div>
+                                  <div className="space-y-3">
+                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Trust Score</span><span className="text-lg font-black italic">{result?.sender_identity_analysis?.sender_trust_score || "0"}</span></div>
+                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Impersonation</span><span className={cn("text-[10px] uppercase font-black px-2 py-1 rounded-full", (result?.sender_identity_analysis?.executive_impersonation || result?.sender_identity_analysis?.brand_impersonation) ? "bg-red-100 text-red-700" : "bg-green-100 text-green-700")}>{(result?.sender_identity_analysis?.executive_impersonation || result?.sender_identity_analysis?.brand_impersonation) ? "DETECTED" : "CLEAN"}</span></div>
+                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Spoofing</span><span className={cn("text-[10px] uppercase font-black", result?.sender_identity_analysis?.spoofing_detected ? "text-red-500" : "text-green-500")}>{result?.sender_identity_analysis?.spoofing_detected ? "DETECTED" : "CLEAN"}</span></div>
+                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Name/Domain Match</span><span className={cn("text-[10px] uppercase font-black", result?.sender_identity_analysis?.name_domain_mismatch ? "text-red-500" : "text-green-500")}>{result?.sender_identity_analysis?.name_domain_mismatch ? "MISMATCH" : "VERIFIED"}</span></div>
+                                  </div>
+                               </div>
+
+                               <div className="bg-white border border-navy/10 p-6 rounded-3xl space-y-4">
+                                  <div className="flex items-center gap-3 pb-3 border-b border-navy/5">
+                                    <AlertTriangle className="text-orange w-5 h-5"/>
+                                    <h4 className="font-black text-xs uppercase tracking-widest">Threat & Social Eng</h4>
+                                  </div>
+                                  <div className="space-y-3">
+                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Urgency Tech</span><span className={cn("text-[10px] uppercase font-black", result?.social_engineering_detection?.urgency_tactics ? "text-orange" : "text-navy/30")}>{result?.social_engineering_detection?.urgency_tactics ? "DETECTED" : "NONE"}</span></div>
+                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Cred Theft</span><span className={cn("text-[10px] uppercase font-black", result?.social_engineering_detection?.credential_theft_attempt ? "text-red-500" : "text-navy/30")}>{result?.social_engineering_detection?.credential_theft_attempt ? "DETECTED" : "NONE"}</span></div>
+                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Malware Host</span><span className={cn("text-[10px] uppercase font-black", result?.threat_intelligence?.malware_hosting_match ? "text-red-500" : "text-navy/30")}>{result?.threat_intelligence?.malware_hosting_match ? "DETECTED" : "NONE"}</span></div>
+                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Domain Typo</span><span className={cn("text-[10px] uppercase font-black", result?.domain_similarity_detection?.typosquatting_detected ? "text-red-500" : "text-navy/30")}>{result?.domain_similarity_detection?.typosquatting_detected ? "DETECTED" : "NONE"}</span></div>
+                                  </div>
+                               </div>
+                            </div>
                         </div>
                       </div>
                     )}
@@ -2672,10 +2703,10 @@ export default function App() {
                   {/* Message Body */}
                   <div className="space-y-1.5">
                     <label className="text-[10px] font-black uppercase tracking-widest text-navy/40 ml-2">
-                      Secure Message Body
+                       Message Body
                     </label>
                     <textarea
-                      required
+                      required={!composeQuote}
                       rows={6}
                       placeholder="Type your message here..."
                       value={composeBody}
@@ -2683,6 +2714,17 @@ export default function App() {
                       className="w-full bg-white border border-navy/10 rounded-2xl py-4 px-4 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-orange/20 transition-all text-navy resize-none"
                     />
                   </div>
+
+                  {composeQuote && (
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-black uppercase tracking-widest text-navy/40 ml-2">
+                         Original Message
+                      </label>
+                      <div className="w-full bg-navy/5 border border-navy/10 rounded-2xl py-4 px-4 text-xs font-mono focus:outline-none transition-all text-navy/60 h-40 overflow-y-auto whitespace-pre-wrap">
+                        {composeQuote}
+                      </div>
+                    </div>
+                  )}
 
                   {/* File / Media Loader - Drag-and-drop & manual support */}
                   <div className="space-y-1.5">
