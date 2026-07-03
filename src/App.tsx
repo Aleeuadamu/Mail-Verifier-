@@ -40,6 +40,10 @@ import {
   Check,
   MoreHorizontal,
   Calendar,
+  CreditCard,
+  Sparkles,
+  Zap,
+  Clock,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import ReactMarkdown from "react-markdown";
@@ -66,6 +70,7 @@ import { auth, db } from "./lib/firebase";
 import {
   doc,
   setDoc,
+  getDoc,
   getDocs,
   collection,
   deleteDoc,
@@ -129,7 +134,157 @@ export default function App() {
     | "alerts"
     | "insights"
     | "admin"
+    | "subscription"
   >("login");
+  const [subscription, setSubscription] = useState<{
+    plan: "free" | "pro" | "enterprise" | string;
+    usage: number;
+    paymentMethod: string;
+    currentPeriodEnd: string | null;
+    trialStartDate?: string | null;
+    invoices: Array<{ id: string; date: string; amount: string; status: "paid" | "pending" }>;
+  }>({
+    plan: "free",
+    usage: 8,
+    paymentMethod: "None",
+    currentPeriodEnd: null,
+    trialStartDate: null,
+    invoices: []
+  });
+
+  const isPremiumActive = () => {
+    if (!subscription) return false;
+    // If the plan is not "free", they have paid/premium access
+    if (subscription.plan !== "free") return true;
+    
+    // If they are on "free", check if they are within the 1-week (7 days) trial
+    if (subscription.trialStartDate) {
+      const start = new Date(subscription.trialStartDate).getTime();
+      const oneWeekMs = 7 * 24 * 60 * 60 * 1000;
+      const now = Date.now();
+      return (now - start) < oneWeekMs;
+    }
+    
+    return true; // default fallback if trialStartDate not set yet
+  };
+
+  const getTrialDaysRemaining = () => {
+    if (!subscription || !subscription.trialStartDate) return 0;
+    const start = new Date(subscription.trialStartDate).getTime();
+    const oneWeekMs = 7 * 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const diff = (start + oneWeekMs) - now;
+    if (diff <= 0) return 0;
+    return Math.ceil(diff / (24 * 60 * 60 * 1000));
+  };
+
+  const getLiveCountdown = () => {
+    if (!subscription) return null;
+    
+    let targetTime = 0;
+    let label = "";
+    
+    if (subscription.plan !== "free") {
+      // Premium paid subscription
+      if (subscription.currentPeriodEnd) {
+        targetTime = new Date(subscription.currentPeriodEnd).getTime();
+        label = "PREMIUM PROTECTION ACTIVE";
+      } else {
+        // Default fallback
+        return null;
+      }
+    } else if (subscription.trialStartDate) {
+      // Free trial active
+      const start = new Date(subscription.trialStartDate).getTime();
+      targetTime = start + 7 * 24 * 60 * 60 * 1000;
+      label = "FREE SECURE TRIAL";
+    } else {
+      return null;
+    }
+    
+    const diff = targetTime - nowTime;
+    if (diff <= 0) {
+      return { expired: true, label, days: 0, hours: 0, minutes: 0, seconds: 0, formatted: "00d 00h 00m 00s (EXPIRED)" };
+    }
+    
+    const seconds = Math.floor((diff / 1000) % 60);
+    const minutes = Math.floor((diff / 1000 / 60) % 60);
+    const hours = Math.floor((diff / (1000 * 60 * 60)) % 24);
+    const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+    
+    const pad = (num: number) => String(num).padStart(2, '0');
+    
+    return {
+      expired: false,
+      label,
+      days,
+      hours,
+      minutes,
+      seconds,
+      formatted: `${days}d ${pad(hours)}h ${pad(minutes)}m ${pad(seconds)}s`
+    };
+  };
+
+  const renderSubscriptionGate = (featureName: string) => {
+    return (
+      <motion.div
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        className="flex flex-col items-center justify-center py-16 px-6 text-center max-w-2xl mx-auto space-y-8"
+      >
+        <div className="relative">
+          <div className="absolute inset-0 bg-orange/20 blur-3xl rounded-full" />
+          <div className="bg-navy p-8 rounded-[2.5rem] relative border border-orange/20 shadow-2xl shadow-navy/20">
+            <Lock className="w-12 h-12 text-orange animate-pulse" />
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          <span className="bg-orange/10 text-orange px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-[3px] border border-orange/20">
+            Subscription Required
+          </span>
+          <h2 className="text-3xl font-display font-black uppercase italic tracking-tighter text-navy leading-tight mt-4">
+            {featureName} IS LOCKED
+          </h2>
+          <p className="text-xs text-navy/60 font-semibold leading-relaxed max-w-md mx-auto">
+            Your 1-week secure trial has expired. Standard free accounts do not have access to real-time security alarm scans, advanced AI reports, interactive AI support chat, or threat radar analytics.
+          </p>
+        </div>
+
+        <div className="flex flex-col sm:flex-row gap-3 w-full max-w-md pt-4">
+          <button
+            onClick={() => setView("subscription")}
+            className="flex-1 bg-navy text-orange hover:bg-navy/95 py-4 rounded-2xl font-black uppercase tracking-widest text-xs transition-all shadow-xl shadow-navy/10 flex items-center justify-center gap-2 cursor-pointer"
+          >
+            <Sparkles className="w-4 h-4 text-orange" />
+            Upgrade to Premium
+          </button>
+          <button
+            onClick={() => setView("inbox")}
+            className="flex-1 bg-navy/5 text-navy hover:bg-navy/10 py-4 rounded-2xl font-black uppercase tracking-widest text-xs transition-all flex items-center justify-center gap-2 cursor-pointer"
+          >
+            Back to Inbox
+          </button>
+        </div>
+
+        {/* Dynamic Trial Expiration Status */}
+        <div className="p-4 bg-navy/[0.02] border border-navy/10 rounded-2xl text-left space-y-1.5 w-full text-xs font-semibold text-navy/70">
+          <div className="flex justify-between">
+            <span className="text-navy/40 uppercase text-[9px] font-black tracking-wider">Account ID</span>
+            <span className="font-mono text-[10px]">{auth.currentUser?.uid?.slice(0, 12)}...</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-navy/40 uppercase text-[9px] font-black tracking-wider">Trial Registered</span>
+            <span>{subscription.trialStartDate ? new Date(subscription.trialStartDate).toLocaleDateString() : "Pending"}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-navy/40 uppercase text-[9px] font-black tracking-wider">Status</span>
+            <span className="text-red-500 font-bold uppercase text-[10px]">Trial Expired / Free Mode</span>
+          </div>
+        </div>
+      </motion.div>
+    );
+  };
   const [activeFolder, setActiveFolder] = useState<
     "inbox" | "sent" | "drafts" | "spam"
   >("inbox");
@@ -150,6 +305,50 @@ export default function App() {
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [showDateFilter, setShowDateFilter] = useState(false);
+
+  // Live Countdown and Premium Request states
+  const [nowTime, setNowTime] = useState<number>(Date.now());
+  const [showUpgradePrompt, setShowUpgradePrompt] = useState<string | null>(null);
+  const [paymentTrackerStep, setPaymentTrackerStep] = useState<number>(-1);
+  const [trackerSuccessCountdown, setTrackerSuccessCountdown] = useState<number>(5);
+
+  React.useEffect(() => {
+    const timer = setInterval(() => {
+      setNowTime(Date.now());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  React.useEffect(() => {
+    let interval: NodeJS.Timeout | null = null;
+    if (paymentTrackerStep === 4) {
+      setTrackerSuccessCountdown(5);
+      interval = setInterval(() => {
+        setTrackerSuccessCountdown((prev) => {
+          if (prev <= 1) {
+            clearInterval(interval!);
+            setIsProcessingCheckout(false);
+            setCheckoutPlan(null);
+            setPaymentTrackerStep(-1);
+            return 5;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [paymentTrackerStep]);
+
+  // Subscription Checkout states
+  const [checkoutPlan, setCheckoutPlan] = useState<"pro" | "enterprise" | null>(null);
+  const [isAnnual, setIsAnnual] = useState(false);
+  const [checkoutCardName, setCheckoutCardName] = useState("");
+  const [checkoutCardNo, setCheckoutCardNo] = useState("");
+  const [checkoutCardExpiry, setCheckoutCardExpiry] = useState("");
+  const [checkoutCardCVC, setCheckoutCardCVC] = useState("");
+  const [isProcessingCheckout, setIsProcessingCheckout] = useState(false);
 
   // Email specific Chat states
   const [chatMessages, setChatMessages] = useState<
@@ -197,6 +396,41 @@ export default function App() {
           fetchInbox(firebaseUser.uid);
         }
 
+        // Fetch user subscription from Firestore or initialize
+        try {
+          const userDocRef = doc(db, "users", firebaseUser.uid);
+          const userDocSnap = await getDoc(userDocRef);
+          
+          let subData = {
+            plan: "free",
+            usage: 8,
+            paymentMethod: "None",
+            currentPeriodEnd: null,
+            trialStartDate: new Date().toISOString(),
+            invoices: []
+          };
+
+          if (userDocSnap.exists()) {
+            const data = userDocSnap.data();
+            if (data.subscription) {
+              subData = {
+                ...subData,
+                ...data.subscription
+              };
+              if (!subData.trialStartDate) {
+                subData.trialStartDate = new Date().toISOString();
+              }
+            } else {
+              await setDoc(userDocRef, { subscription: subData }, { merge: true });
+            }
+          } else {
+            await setDoc(userDocRef, { subscription: subData }, { merge: true });
+          }
+          setSubscription(subData);
+        } catch (subErr) {
+          console.warn("Failed to fetch user subscription, using local fallback (client offline/sandbox):", subErr);
+        }
+
         try {
           await setDoc(
             doc(db, "users", firebaseUser.uid),
@@ -209,7 +443,7 @@ export default function App() {
             { merge: true },
           );
         } catch (e) {
-          console.error("Failed to sync user to Firestore", e);
+          console.warn("Failed to sync user to Firestore (client offline/sandbox):", e);
         }
       } else {
         setUser(null);
@@ -408,6 +642,10 @@ export default function App() {
   };
 
   const triggerInboxScan = async (messages: GmailMessage[]) => {
+    if (!isPremiumActive()) {
+      console.log("Subscription inactive (Trial expired): background inbox scan skipped");
+      return;
+    }
     if (messages.length === 0) return;
     setIsScanning(true);
     try {
@@ -533,10 +771,38 @@ export default function App() {
   };
 
   const handleAnalyze = async (dataToAnalyze: EmailData) => {
+    if (!isPremiumActive()) {
+      setShowUpgradePrompt("AI Email Threat Audit");
+      return;
+    }
+
+    if (subscription.plan === "free" && subscription.usage >= 50) {
+      setShowUpgradePrompt("Unlimited AI Email Audits");
+      return;
+    }
+
     setIsAnalyzing(true);
     try {
       const output = await analyzeEmail(dataToAnalyze, "SINGLE_EMAIL_VIEW");
       setResult(output);
+
+      // Increment usage count and sync to Firestore
+      const newUsage = subscription.usage + 1;
+      const updatedSub = { ...subscription, usage: newUsage };
+      setSubscription(updatedSub);
+      
+      const firebaseUser = auth.currentUser;
+      if (firebaseUser) {
+        try {
+          await setDoc(
+            doc(db, "users", firebaseUser.uid),
+            { subscription: updatedSub },
+            { merge: true }
+          );
+        } catch (e) {
+          console.warn("Failed to sync updated usage to Firestore (client offline/sandbox):", e);
+        }
+      }
     } catch (error) {
       console.error(error);
       setResult(null);
@@ -545,8 +811,169 @@ export default function App() {
     }
   };
 
+  const openCheckoutModal = (plan: "pro" | "enterprise") => {
+    setCheckoutPlan(plan);
+    setCheckoutCardName("");
+    setCheckoutCardNo("");
+    setCheckoutCardExpiry("");
+    setCheckoutCardCVC("");
+  };
+
+  const handleCheckoutSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!checkoutPlan) return;
+    if (!checkoutCardName || !checkoutCardNo || !checkoutCardExpiry || !checkoutCardCVC) {
+      alert("Please enter all required security details for your payment card.");
+      return;
+    }
+
+    setIsProcessingCheckout(true);
+    setPaymentTrackerStep(0);
+    
+    try {
+      // Step 0 -> Step 1 after 1200ms
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      setPaymentTrackerStep(1);
+
+      // Step 1 -> Step 2 after 1200ms
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      setPaymentTrackerStep(2);
+
+      // Step 2 -> Step 3 after 1200ms
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      setPaymentTrackerStep(3);
+
+      // Step 3 -> Upgrade database & state, then trigger success countdown (Step 4) after 1200ms
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+
+      const price = isAnnual ? "$4.00/mo ($48.00/yr)" : "$5.00/mo";
+      const invoiceId = "INV_" + Math.random().toString(36).substr(2, 9).toUpperCase();
+      const invoiceDate = new Date().toLocaleDateString("en-US", {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+      });
+
+      const nextPeriod = new Date();
+      if (isAnnual) {
+        nextPeriod.setFullYear(nextPeriod.getFullYear() + 1);
+      } else {
+        nextPeriod.setDate(nextPeriod.getDate() + 30);
+      }
+      const renewDate = nextPeriod.toLocaleDateString("en-US", {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+      });
+
+      const newInvoice = {
+        id: invoiceId,
+        date: invoiceDate,
+        amount: price,
+        status: "paid" as const,
+      };
+
+      const prevInvoices = subscription.invoices || [];
+      const updatedSub = {
+        plan: checkoutPlan,
+        usage: subscription.usage, // Preserve current scan metrics
+        paymentMethod: `Visa ending in ${checkoutCardNo.trim().slice(-4)}`,
+        currentPeriodEnd: renewDate,
+        trialStartDate: subscription.trialStartDate,
+        invoices: [newInvoice, ...prevInvoices],
+      };
+
+      setSubscription(updatedSub);
+
+      const firebaseUser = auth.currentUser;
+      if (firebaseUser) {
+        await setDoc(
+          doc(db, "users", firebaseUser.uid),
+          { subscription: updatedSub },
+          { merge: true }
+        );
+      }
+
+      setPaymentTrackerStep(4);
+    } catch (checkoutErr) {
+      console.error("Failed to process payment checkout", checkoutErr);
+      alert("Transaction verification failed. Please try again.");
+      setIsProcessingCheckout(false);
+      setPaymentTrackerStep(-1);
+    }
+  };
+
+  const handleDowngradeToFree = async () => {
+    if (!confirm("Are you sure you want to transition back to the Standard (Free) tier? Your unlimited auditing privileges will revert to a 50-scan monthly limit.")) {
+      return;
+    }
+
+    try {
+      const updatedSub = {
+        plan: "free",
+        usage: subscription.usage,
+        paymentMethod: "None",
+        currentPeriodEnd: null,
+        trialStartDate: subscription.trialStartDate,
+        invoices: subscription.invoices || [],
+      };
+
+      setSubscription(updatedSub);
+
+      const firebaseUser = auth.currentUser;
+      if (firebaseUser) {
+        await setDoc(
+          doc(db, "users", firebaseUser.uid),
+          { subscription: updatedSub },
+          { merge: true }
+        );
+      }
+
+      alert("Plan changed. Your account has been reverted to the Standard (Free) tier.");
+    } catch (err) {
+      console.error("Failed to downgrade subscription", err);
+      alert("Could not process downgrade request. Please try again.");
+    }
+  };
+
+  const handleCancelSubscription = async () => {
+    if (!confirm("Are you sure you want to cancel your secure subscription? You will lose unlimited scans and priority neural threat classification.")) {
+      return;
+    }
+
+    try {
+      const updatedSub = {
+        plan: "free",
+        usage: subscription.usage,
+        paymentMethod: "None",
+        currentPeriodEnd: null,
+        trialStartDate: subscription.trialStartDate,
+        invoices: subscription.invoices || [],
+      };
+
+      setSubscription(updatedSub);
+
+      const firebaseUser = auth.currentUser;
+      if (firebaseUser) {
+        await setDoc(
+          doc(db, "users", firebaseUser.uid),
+          { subscription: updatedSub },
+          { merge: true }
+        );
+      }
+
+      alert("Subscription cancelled successfully. You are now on the Free plan.");
+    } catch (err) {
+      console.error("Failed to cancel subscription", err);
+    }
+  };
+
   const handleSendChatMessage = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isPremiumActive()) {
+      setShowUpgradePrompt("Interactive Secure Support Chat");
+      return;
+    }
     if (!chatInput.trim() || isSendingChatMessage) return;
 
     const userMsg = chatInput.trim();
@@ -787,6 +1214,40 @@ export default function App() {
             </h1>
           </div>
 
+          {/* Live Premium/Trial Countdown Ticker Badge in Sidebar */}
+          {getLiveCountdown() && (
+            <div className="px-6 mb-4 shrink-0">
+              <div className="p-3.5 bg-orange/5 border border-orange/15 rounded-2xl space-y-1.5 shadow-sm">
+                <div className="flex items-center gap-1.5 text-orange">
+                  {subscription.plan !== "free" ? (
+                    <Zap className="w-3.5 h-3.5 fill-current animate-pulse text-orange" />
+                  ) : (
+                    <Clock className="w-3.5 h-3.5 animate-spin text-orange" style={{ animationDuration: '4s' }} />
+                  )}
+                  <p className="text-[8px] font-black uppercase tracking-[1.5px] leading-none text-navy">
+                    {getLiveCountdown()?.label}
+                  </p>
+                </div>
+                <div className="flex justify-between items-baseline">
+                  <span className="font-mono text-xs font-black text-orange leading-none tracking-tight">
+                    {getLiveCountdown()?.formatted}
+                  </span>
+                  {subscription.plan === "free" && (
+                    <button
+                      onClick={() => {
+                        setView("subscription");
+                        openCheckoutModal("pro");
+                      }}
+                      className="text-[8px] font-black uppercase tracking-wider text-navy border-b border-navy pb-0.5 hover:text-orange hover:border-orange transition-colors cursor-pointer"
+                    >
+                      UPGRADE
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="flex-1 overflow-y-auto px-6 pb-6">
             <nav className="flex flex-col gap-4">
               {/* Mailboxes Group */}
@@ -888,6 +1349,21 @@ export default function App() {
 
               <div className="space-y-1 pt-2">
                 <button
+                  onClick={() => setView("subscription")}
+                  className={cn(
+                    "flex items-center gap-3 px-4 py-3.5 w-full rounded-2xl transition-colors",
+                    view === "subscription"
+                      ? "bg-navy/5 text-orange font-bold"
+                      : "text-navy hover:bg-navy/5",
+                  )}
+                >
+                  <CreditCard className="w-5 h-5" />
+                  <span className="text-xs font-black uppercase tracking-widest">
+                    Subscription
+                  </span>
+                </button>
+
+                <button
                   onClick={() => setView("settings")}
                   className={cn(
                     "flex items-center gap-3 px-4 py-3.5 w-full rounded-2xl transition-colors",
@@ -981,6 +1457,38 @@ export default function App() {
                       className="absolute top-16 left-0 right-0 z-50 bg-white border-b border-navy/15 shadow-2xl md:hidden overflow-hidden flex flex-col"
                     >
                       <div className="p-4 space-y-4">
+                        {getLiveCountdown() && (
+                          <div className="p-3 bg-orange/5 border border-orange/15 rounded-2xl flex justify-between items-center shrink-0">
+                            <div className="flex items-center gap-2.5">
+                              {subscription.plan !== "free" ? (
+                                <Zap className="w-4 h-4 fill-current text-orange animate-pulse" />
+                              ) : (
+                                <Clock className="w-4 h-4 text-orange animate-spin" style={{ animationDuration: '4s' }} />
+                              )}
+                              <div>
+                                <p className="text-[7px] font-black uppercase tracking-wider text-navy/40 leading-none">
+                                  {getLiveCountdown()?.label}
+                                </p>
+                                <p className="font-mono text-[10px] font-black text-orange mt-1 leading-none">
+                                  {getLiveCountdown()?.formatted}
+                                </p>
+                              </div>
+                            </div>
+                            {subscription.plan === "free" && (
+                              <button
+                                onClick={() => {
+                                  setView("subscription");
+                                  setMobileMenuOpen(false);
+                                  openCheckoutModal("pro");
+                                }}
+                                className="bg-navy text-orange text-[8px] font-black uppercase tracking-widest px-3 py-1.5 rounded-lg active:scale-95 transition-all cursor-pointer"
+                              >
+                                UPGRADE
+                              </button>
+                            )}
+                          </div>
+                        )}
+
                         <div className="space-y-1">
                           <span className="text-[9px] font-black uppercase tracking-widest text-navy/40 pl-3">
                             Mail Folders
@@ -1085,6 +1593,21 @@ export default function App() {
                             >
                               <Globe className="w-4 h-4" />
                               <span>Global Insights</span>
+                            </button>
+                            <button
+                              onClick={() => {
+                                setView("subscription");
+                                setMobileMenuOpen(false);
+                              }}
+                              className={cn(
+                                "flex items-center gap-3 px-3 py-2.5 rounded-xl text-left text-xs font-bold uppercase tracking-wider transition-colors",
+                                view === "subscription"
+                                  ? "bg-navy text-orange"
+                                  : "bg-navy/5 text-navy hover:bg-navy/10",
+                              )}
+                            >
+                              <CreditCard className="w-4 h-4" />
+                              <span>Billing & Subscription</span>
                             </button>
                             <button
                               onClick={() => {
@@ -1987,76 +2510,82 @@ export default function App() {
                 exit={{ opacity: 0 }}
                 className="space-y-8"
               >
-                <div className="space-y-1">
-                  <h2 className="text-3xl font-display font-black uppercase italic tracking-tighter text-navy flex items-center gap-3 leading-none">
-                    <ShieldAlert className="text-orange w-8 h-8" />
-                    REALTIME ALERTS
-                  </h2>
-                  <p className="text-[10px] font-black uppercase tracking-[5px] text-navy/30">
-                    Active Neural Monitoring
-                  </p>
-                </div>
-
-                <div className="space-y-4">
-                  {inbox.filter(
-                    (m) =>
-                      m.analysis &&
-                      (m.analysis.classification === "Phishing" ||
-                        m.analysis.classification === "Likely Phishing"),
-                  ).length === 0 ? (
-                    <div className="py-20 bg-navy/[0.02] border-2 border-dashed border-navy/5 rounded-[3rem] flex flex-col items-center justify-center text-center p-8 space-y-4">
-                      <ShieldCheck className="w-16 h-16 text-green-500 opacity-20" />
-                      <div>
-                        <p className="text-sm font-bold text-navy">
-                          No Critical Threats
-                        </p>
-                        <p className="text-[10px] uppercase font-black tracking-widest text-navy/30">
-                          Your inbox is currently clear of active phishing
-                          attempts.
-                        </p>
-                      </div>
+                {!isPremiumActive() ? (
+                  renderSubscriptionGate("REAL-TIME SECURITY ALARM RADAR")
+                ) : (
+                  <>
+                    <div className="space-y-1">
+                      <h2 className="text-3xl font-display font-black uppercase italic tracking-tighter text-navy flex items-center gap-3 leading-none">
+                        <ShieldAlert className="text-orange w-8 h-8" />
+                        REALTIME ALERTS
+                      </h2>
+                      <p className="text-[10px] font-black uppercase tracking-[5px] text-navy/30">
+                        Active Neural Monitoring
+                      </p>
                     </div>
-                  ) : (
-                    inbox
-                      .filter(
+
+                    <div className="space-y-4">
+                      {inbox.filter(
                         (m) =>
                           m.analysis &&
                           (m.analysis.classification === "Phishing" ||
                             m.analysis.classification === "Likely Phishing"),
-                      )
-                      .map((msg) => (
-                        <motion.div
-                          key={msg.id}
-                          onClick={() => selectEmail(msg)}
-                          className="bg-red-50 p-6 rounded-[2.5rem] border border-red-100 space-y-3 cursor-pointer relative overflow-hidden"
-                        >
-                          <div className="absolute top-0 right-0 p-4 opacity-5">
-                            <AlertTriangle className="w-12 h-12 text-red-600" />
+                      ).length === 0 ? (
+                        <div className="py-20 bg-navy/[0.02] border-2 border-dashed border-navy/5 rounded-[3rem] flex flex-col items-center justify-center text-center p-8 space-y-4">
+                          <ShieldCheck className="w-16 h-16 text-green-500 opacity-20" />
+                          <div>
+                            <p className="text-sm font-bold text-navy">
+                              No Critical Threats
+                            </p>
+                            <p className="text-[10px] uppercase font-black tracking-widest text-navy/30">
+                              Your inbox is currently clear of active phishing
+                              attempts.
+                            </p>
                           </div>
-                          <div className="flex items-center gap-2">
-                            <div className="px-2 py-0.5 bg-red-600 text-white text-[8px] font-black uppercase tracking-widest rounded-full">
-                              DANGER
-                            </div>
-                            <span className="text-[9px] font-mono text-red-900/40 uppercase truncate max-w-[200px]">
-                              {msg.from}
-                            </span>
-                          </div>
-                          <h3 className="text-red-900 font-bold text-lg leading-tight">
-                            {msg.subject}
-                          </h3>
-                          <p className="text-red-800/70 text-[11px] font-medium italic italic leading-relaxed">
-                            {msg.analysis?.short_reason ||
-                              "Detecting suspicious patterns. Do not click any links."}
-                          </p>
-                          <div className="pt-2">
-                            <span className="text-[9px] font-black uppercase tracking-widest text-red-600 border-b border-red-600 pb-0.5">
-                              Secure Analysis Result
-                            </span>
-                          </div>
-                        </motion.div>
-                      ))
-                  )}
-                </div>
+                        </div>
+                      ) : (
+                        inbox
+                          .filter(
+                            (m) =>
+                              m.analysis &&
+                              (m.analysis.classification === "Phishing" ||
+                                m.analysis.classification === "Likely Phishing"),
+                          )
+                          .map((msg) => (
+                            <motion.div
+                              key={msg.id}
+                              onClick={() => selectEmail(msg)}
+                              className="bg-red-50 p-6 rounded-[2.5rem] border border-red-100 space-y-3 cursor-pointer relative overflow-hidden"
+                            >
+                              <div className="absolute top-0 right-0 p-4 opacity-5">
+                                <AlertTriangle className="w-12 h-12 text-red-600" />
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <div className="px-2 py-0.5 bg-red-600 text-white text-[8px] font-black uppercase tracking-widest rounded-full">
+                                  DANGER
+                                </div>
+                                <span className="text-[9px] font-mono text-red-900/40 uppercase truncate max-w-[200px]">
+                                  {msg.from}
+                                </span>
+                              </div>
+                              <h3 className="text-red-900 font-bold text-lg leading-tight">
+                                {msg.subject}
+                              </h3>
+                              <p className="text-red-800/70 text-[11px] font-medium italic italic leading-relaxed">
+                                {msg.analysis?.short_reason ||
+                                  "Detecting suspicious patterns. Do not click any links."}
+                              </p>
+                              <div className="pt-2">
+                                <span className="text-[9px] font-black uppercase tracking-widest text-red-600 border-b border-red-600 pb-0.5">
+                                  Secure Analysis Result
+                                </span>
+                              </div>
+                            </motion.div>
+                          ))
+                      )}
+                    </div>
+                  </>
+                )}
               </motion.div>
             )}
 
@@ -2068,113 +2597,119 @@ export default function App() {
                 exit={{ opacity: 0 }}
                 className="space-y-8"
               >
-                <div className="space-y-1">
-                  <h2 className="text-3xl font-display font-black uppercase italic tracking-tighter text-navy flex items-center gap-3 leading-none">
-                    <Globe className="text-orange w-8 h-8" />
-                    THREAT INSIGHTS
-                  </h2>
-                  <p className="text-[10px] font-black uppercase tracking-[5px] text-navy/30">
-                    Neural Analytics Hub
-                  </p>
-                </div>
+                {!isPremiumActive() ? (
+                  renderSubscriptionGate("THREAT INSIGHTS ANALYTICS")
+                ) : (
+                  <>
+                    <div className="space-y-1">
+                      <h2 className="text-3xl font-display font-black uppercase italic tracking-tighter text-navy flex items-center gap-3 leading-none">
+                        <Globe className="text-orange w-8 h-8" />
+                        THREAT INSIGHTS
+                      </h2>
+                      <p className="text-[10px] font-black uppercase tracking-[5px] text-navy/30">
+                        Neural Analytics Hub
+                      </p>
+                    </div>
 
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="bg-navy/[0.03] p-6 rounded-[2.5rem] border border-navy/10 space-y-2 text-navy">
-                    <p className="text-[9px] font-black uppercase tracking-widest opacity-40 leading-none">
-                      Total Audited
-                    </p>
-                    <p className="text-4xl font-display font-black italic leading-none">
-                      {inbox.length}
-                    </p>
-                  </div>
-                  <div className="bg-orange/5 p-6 rounded-[2.5rem] border border-orange/10 space-y-2 text-orange">
-                    <p className="text-[9px] font-black uppercase tracking-widest opacity-60 leading-none">
-                      Neutralized
-                    </p>
-                    <p className="text-4xl font-display font-black italic leading-none">
-                      {
-                        inbox.filter(
-                          (m) =>
-                            m.analysis &&
-                            (m.analysis.classification === "Phishing" ||
-                              m.analysis.classification === "Likely Phishing"),
-                        ).length
-                      }
-                    </p>
-                  </div>
-                </div>
-
-                <div className="bg-navy text-white p-8 rounded-[3rem] space-y-6">
-                  <h3 className="text-xl font-display font-black uppercase italic tracking-tight leading-none">
-                    Risk Atmosphere
-                  </h3>
-                  <div className="space-y-4">
-                    {[
-                      {
-                        label: "Phishing Attempts",
-                        val: inbox.filter(
-                          (m) =>
-                            m.analysis &&
-                            (m.analysis.classification === "Phishing" ||
-                              m.analysis.classification === "Likely Phishing"),
-                        ).length,
-                        color: "bg-red-500",
-                      },
-                      {
-                        label: "Suspicious Activity",
-                        val: inbox.filter(
-                          (m) =>
-                            m.analysis &&
-                            m.analysis.classification === "Suspicious",
-                        ).length,
-                        color: "bg-yellow-500",
-                      },
-                      {
-                        label: "Safe Transfers",
-                        val: inbox.filter(
-                          (m) =>
-                            m.analysis &&
-                            (m.analysis.classification === "Safe" ||
-                              m.analysis.classification === "Likely Safe"),
-                        ).length,
-                        color: "bg-green-500",
-                      },
-                    ].map((item, i) => (
-                      <div key={i} className="space-y-2">
-                        <div className="flex justify-between text-[10px] font-black uppercase tracking-widest">
-                          <span className="opacity-60">{item.label}</span>
-                          <span>
-                            {Math.round((item.val / (inbox.length || 1)) * 100)}
-                            %
-                          </span>
-                        </div>
-                        <div className="h-1 bg-white/10 rounded-full overflow-hidden">
-                          <motion.div
-                            initial={{ width: 0 }}
-                            animate={{
-                              width: `${(item.val / (inbox.length || 1)) * 100}%`,
-                            }}
-                            className={cn("h-full", item.color)}
-                          />
-                        </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="bg-navy/[0.03] p-6 rounded-[2.5rem] border border-navy/10 space-y-2 text-navy">
+                        <p className="text-[9px] font-black uppercase tracking-widest opacity-40 leading-none">
+                          Total Audited
+                        </p>
+                        <p className="text-4xl font-display font-black italic leading-none">
+                          {inbox.length}
+                        </p>
                       </div>
-                    ))}
-                  </div>
-                </div>
+                      <div className="bg-orange/5 p-6 rounded-[2.5rem] border border-orange/10 space-y-2 text-orange">
+                        <p className="text-[9px] font-black uppercase tracking-widest opacity-60 leading-none">
+                          Neutralized
+                        </p>
+                        <p className="text-4xl font-display font-black italic leading-none">
+                          {
+                            inbox.filter(
+                              (m) =>
+                                m.analysis &&
+                                (m.analysis.classification === "Phishing" ||
+                                  m.analysis.classification === "Likely Phishing"),
+                            ).length
+                          }
+                        </p>
+                      </div>
+                    </div>
 
-                <div className="bg-navy/5 p-8 rounded-[3rem] border border-navy/10 space-y-4">
-                  <h3 className="text-lg font-bold text-navy leading-none">
-                    Global Threat Vector
-                  </h3>
-                  <p className="text-xs text-navy/60 leading-relaxed font-medium">
-                    Most common attack vector detected in your region:{" "}
-                    <span className="text-orange font-bold font-mono">
-                      FINANCIAL_IP_SPOOFING
-                    </span>
-                    . Our AI has updated your local neural protocols to
-                    prioritize domain trust signals.
-                  </p>
-                </div>
+                    <div className="bg-navy text-white p-8 rounded-[3rem] space-y-6">
+                      <h3 className="text-xl font-display font-black uppercase italic tracking-tight leading-none">
+                        Risk Atmosphere
+                      </h3>
+                      <div className="space-y-4">
+                        {[
+                          {
+                            label: "Phishing Attempts",
+                            val: inbox.filter(
+                              (m) =>
+                                m.analysis &&
+                                (m.analysis.classification === "Phishing" ||
+                                  m.analysis.classification === "Likely Phishing"),
+                            ).length,
+                            color: "bg-red-500",
+                          },
+                          {
+                            label: "Suspicious Activity",
+                            val: inbox.filter(
+                              (m) =>
+                                m.analysis &&
+                                m.analysis.classification === "Suspicious",
+                            ).length,
+                            color: "bg-yellow-500",
+                          },
+                          {
+                            label: "Safe Transfers",
+                            val: inbox.filter(
+                              (m) =>
+                                m.analysis &&
+                                (m.analysis.classification === "Safe" ||
+                                  m.analysis.classification === "Likely Safe"),
+                            ).length,
+                            color: "bg-green-500",
+                          },
+                        ].map((item, i) => (
+                          <div key={i} className="space-y-2">
+                            <div className="flex justify-between text-[10px] font-black uppercase tracking-widest">
+                              <span className="opacity-60">{item.label}</span>
+                              <span>
+                                {Math.round((item.val / (inbox.length || 1)) * 100)}
+                                %
+                              </span>
+                            </div>
+                            <div className="h-1 bg-white/10 rounded-full overflow-hidden">
+                              <motion.div
+                                initial={{ width: 0 }}
+                                animate={{
+                                  width: `${(item.val / (inbox.length || 1)) * 100}%`,
+                                }}
+                                className={cn("h-full", item.color)}
+                              />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="bg-navy/5 p-8 rounded-[3rem] border border-navy/10 space-y-4">
+                      <h3 className="text-lg font-bold text-navy leading-none">
+                        Global Threat Vector
+                      </h3>
+                      <p className="text-xs text-navy/60 leading-relaxed font-medium">
+                        Most common attack vector detected in your region:{" "}
+                        <span className="text-orange font-bold font-mono">
+                          FINANCIAL_IP_SPOOFING
+                        </span>
+                        . Our AI has updated your local neural protocols to
+                        prioritize domain trust signals.
+                      </p>
+                    </div>
+                  </>
+                )}
               </motion.div>
             )}
 
@@ -2596,27 +3131,48 @@ export default function App() {
                         </div>
 
                         {/* Input Bar */}
-                        <form
-                          onSubmit={handleSendChatMessage}
-                          className="p-4 bg-navy/[0.02] border-t border-navy/10 flex gap-2"
-                        >
-                          <input
-                            type="text"
-                            required
-                            value={chatInput}
-                            onChange={(e) => setChatInput(e.target.value)}
-                            disabled={isSendingChatMessage}
-                            placeholder="Ask anything about content, sender domain authentication, safety, spoofing..."
-                            className="flex-1 bg-white border border-navy/10 rounded-xl px-4 py-3 text-xs font-semibold focus:ring-2 focus:ring-orange/20 focus:outline-none text-navy disabled:opacity-50"
-                          />
-                          <button
-                            type="submit"
-                            disabled={isSendingChatMessage || !chatInput.trim()}
-                            className="bg-navy text-orange p-3 rounded-xl hover:bg-navy/95 transition-all active:scale-95 flex items-center justify-center shadow-md shadow-navy/10 disabled:opacity-50"
+                        {!isPremiumActive() ? (
+                          <div className="p-4 bg-orange/5 border-t border-navy/10 flex flex-col items-center text-center space-y-2 w-full">
+                            <div className="flex items-center gap-1.5 text-orange">
+                              <Lock className="w-3.5 h-3.5" />
+                              <p className="text-[10px] font-black uppercase tracking-wider">
+                                SECURE CHAT LOCKED
+                              </p>
+                            </div>
+                            <p className="text-[10px] text-navy/60 font-semibold leading-relaxed max-w-sm">
+                              AI assistant interactive chat is a Premium feature. Upgrade to Premium Protection to unlock unlimited live threat analysis.
+                            </p>
+                            <button
+                              type="button"
+                              onClick={() => setView("subscription")}
+                              className="bg-navy text-orange text-[9px] font-black uppercase tracking-widest px-4 py-1.5 rounded-lg hover:bg-navy/90 transition-colors"
+                            >
+                              Upgrade Now
+                            </button>
+                          </div>
+                        ) : (
+                          <form
+                            onSubmit={handleSendChatMessage}
+                            className="p-4 bg-navy/[0.02] border-t border-navy/10 flex gap-2"
                           >
-                            <Send className="w-4 h-4" />
-                          </button>
-                        </form>
+                            <input
+                              type="text"
+                              required
+                              value={chatInput}
+                              onChange={(e) => setChatInput(e.target.value)}
+                              disabled={isSendingChatMessage}
+                              placeholder="Ask anything about content, sender domain authentication, safety, spoofing..."
+                              className="flex-1 bg-white border border-navy/10 rounded-xl px-4 py-3 text-xs font-semibold focus:ring-2 focus:ring-orange/20 focus:outline-none text-navy disabled:opacity-50"
+                            />
+                            <button
+                              type="submit"
+                              disabled={isSendingChatMessage || !chatInput.trim()}
+                              className="bg-navy text-orange p-3 rounded-xl hover:bg-navy/95 transition-all active:scale-95 flex items-center justify-center shadow-md shadow-navy/10 disabled:opacity-50"
+                            >
+                              <Send className="w-4 h-4" />
+                            </button>
+                          </form>
+                        )}
                       </div>
                     )}
                   </div>
@@ -2848,6 +3404,18 @@ export default function App() {
                             Authenticated
                           </span>
                         </div>
+
+                        <div className="flex justify-between items-center px-2">
+                          <span className="text-[10px] font-black uppercase tracking-widest text-navy/40">
+                            Secure Plan
+                          </span>
+                          <button
+                            onClick={() => setView("subscription")}
+                            className="text-[9px] font-black uppercase tracking-widest text-orange hover:underline cursor-pointer"
+                          >
+                            {subscription.plan === "free" ? "Free Trial (Manage)" : "Premium Protection (Manage)"}
+                          </button>
+                        </div>
                       </div>
 
                       <button
@@ -2856,6 +3424,663 @@ export default function App() {
                       >
                         Sign Out
                       </button>
+                    </div>
+                  )}
+                </div>
+              </motion.div>
+            )}
+
+            {view === "subscription" && (
+              <motion.div
+                key="subscription"
+                initial={{ opacity: 0, x: 20 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -20 }}
+                className="space-y-8 pb-12"
+              >
+                {/* Header with back button */}
+                <div className="flex items-center gap-4 text-navy">
+                  <button
+                    onClick={() => setView("inbox")}
+                    className="p-3 bg-navy/5 rounded-2xl text-navy hover:bg-navy/10 transition-colors cursor-pointer"
+                  >
+                    <ArrowRight className="w-5 h-5 rotate-180 text-orange" />
+                  </button>
+                  <div className="space-y-0.5">
+                    <h2 className="text-2xl font-display font-black uppercase italic tracking-tighter text-navy leading-none">
+                      SECURE SUBSCRIPTION
+                    </h2>
+                    <p className="text-[9px] font-black uppercase tracking-[3px] text-orange leading-none mt-1">
+                      Free Trial & Premium Protection Plans
+                    </p>
+                  </div>
+                </div>
+
+                {/* Checkout Modal Overlay */}
+                {checkoutPlan && (
+                  <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-navy/60 backdrop-blur-md">
+                    <motion.div 
+                      initial={{ scale: 0.95, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                      className="bg-white rounded-[3rem] border border-navy/10 shadow-2xl p-8 max-w-lg w-full relative overflow-hidden"
+                    >
+                      {paymentTrackerStep === -1 && (
+                        <button 
+                          onClick={() => setCheckoutPlan(null)}
+                          className="absolute top-6 right-6 p-2 bg-navy/5 rounded-full hover:bg-navy/10 text-navy transition-colors cursor-pointer"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      )}
+
+                      <div className="space-y-6">
+                        {paymentTrackerStep >= 0 ? (
+                          /* Automated Payment Tracking Screen */
+                          <div className="space-y-6 py-4">
+                            <div className="text-center space-y-2">
+                              <span className="bg-orange/10 text-orange px-3 py-1.5 rounded-full text-[9px] font-black uppercase tracking-[3px] border border-orange/20">
+                                Realtime Payment Router
+                              </span>
+                              <h3 className="text-2xl font-display font-black uppercase italic tracking-tight text-navy">
+                                {paymentTrackerStep === 4 ? "PAYMENT SUCCESSFUL" : "PROCESSING SECURE FUNDS"}
+                              </h3>
+                              <p className="text-xs text-navy/60 font-semibold max-w-sm mx-auto">
+                                {paymentTrackerStep === 4 
+                                  ? "Your high-speed neural scanning license is now active." 
+                                  : "Tracking your bank handshake in real-time through decentralized routing."
+                                }
+                              </p>
+                            </div>
+
+                            {/* Main Loader / Celebration Visual */}
+                            <div className="relative flex justify-center py-6">
+                              {paymentTrackerStep === 4 ? (
+                                <motion.div 
+                                  animate={{ scale: [1, 1.1, 1] }}
+                                  transition={{ repeat: Infinity, duration: 1.5 }}
+                                  className="relative"
+                                >
+                                  <div className="absolute inset-0 bg-green-500/20 blur-3xl rounded-full" />
+                                  <div className="bg-green-500 text-white p-8 rounded-full relative border-4 border-white shadow-2xl flex items-center justify-center">
+                                    <Check className="w-16 h-16" />
+                                  </div>
+                                </motion.div>
+                              ) : (
+                                <div className="relative w-28 h-28 flex items-center justify-center">
+                                  <div className="absolute inset-0 border-4 border-orange/10 rounded-full" />
+                                  <div className="absolute inset-0 border-4 border-orange border-t-transparent rounded-full animate-spin" />
+                                  <ShieldCheck className="w-10 h-10 text-orange" />
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Status Steps tracking */}
+                            <div className="space-y-3 bg-navy/[0.02] border border-navy/10 rounded-2xl p-5">
+                              {[
+                                { id: 0, text: "Validating safe card instruments..." },
+                                { id: 1, text: "Exchanging secure tokens with gateway..." },
+                                { id: 2, text: "Authenticating premium fund clearance..." },
+                                { id: 3, text: "Activating premium neural routing cluster..." }
+                              ].map((step, idx) => {
+                                const isDone = paymentTrackerStep > step.id;
+                                const isActive = paymentTrackerStep === step.id;
+                                return (
+                                  <div key={idx} className="flex justify-between items-center text-xs font-semibold">
+                                    <div className="flex items-center gap-2.5">
+                                      {isDone ? (
+                                        <Check className="w-4 h-4 text-green-500 shrink-0" />
+                                      ) : isActive ? (
+                                        <Loader2 className="w-4 h-4 text-orange animate-spin shrink-0" />
+                                      ) : (
+                                        <div className="w-4 h-4 rounded-full border-2 border-navy/10 shrink-0" />
+                                      )}
+                                      <span className={cn(
+                                        isDone ? "text-navy/50 line-through" : isActive ? "text-navy font-bold" : "text-navy/30"
+                                      )}>
+                                        {step.text}
+                                      </span>
+                                    </div>
+                                    <span className="font-mono text-[9px] font-black tracking-wider text-navy/40">
+                                      {isDone ? "SUCCESS" : isActive ? "ACTIVE" : "PENDING"}
+                                    </span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+
+                            {/* Success countdown banner */}
+                            {paymentTrackerStep === 4 && (
+                              <motion.div 
+                                initial={{ opacity: 0, y: 10 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                className="bg-navy text-white rounded-2xl p-4 text-center space-y-1 shadow-lg"
+                              >
+                                <p className="text-[9px] font-black uppercase tracking-[2px] text-orange">
+                                  REDIRECTING SECURE AGENT IN
+                                </p>
+                                <p className="font-mono text-3xl font-black text-orange leading-none mt-1">
+                                  {trackerSuccessCountdown} <span className="text-sm font-semibold">SEC</span>
+                                </p>
+                              </motion.div>
+                            )}
+                          </div>
+                        ) : (
+                          /* Normal Credit Card Form layout */
+                          <>
+                            <div className="space-y-1">
+                              <p className="text-[9px] font-black uppercase tracking-[3px] text-orange">
+                                UPGRADE TRANSACTION
+                              </p>
+                              <h3 className="text-2xl font-display font-black uppercase italic tracking-tight text-navy">
+                                SECURE CHECKOUT
+                              </h3>
+                            </div>
+
+                            {/* Visual Virtual Card */}
+                            <div className="bg-gradient-to-tr from-navy to-navy/80 text-white p-6 rounded-3xl space-y-8 shadow-xl shadow-navy/25 relative overflow-hidden">
+                              <div className="absolute top-0 right-0 p-6 opacity-10">
+                                <ShieldCheck className="w-24 h-24 text-orange" />
+                              </div>
+                              
+                              <div className="flex justify-between items-start">
+                                <span className="text-[9px] font-mono tracking-widest text-white/50 uppercase">
+                                  MAIL VERIFIER AUDITOR
+                                </span>
+                                <Sparkles className="w-6 h-6 text-orange" />
+                              </div>
+
+                              <div className="space-y-4">
+                                <p className="text-lg font-mono tracking-[4px] font-bold">
+                                  {checkoutCardNo || "•••• •••• •••• ••••"}
+                                </p>
+                                <div className="flex justify-between items-end">
+                                  <div>
+                                    <p className="text-[8px] font-mono text-white/40 uppercase tracking-widest leading-none">
+                                      Cardholder Name
+                                    </p>
+                                    <p className="text-xs font-mono font-bold tracking-wider truncate max-w-[160px]">
+                                      {checkoutCardName.toUpperCase() || "SECURE AGENT"}
+                                    </p>
+                                  </div>
+                                  <div>
+                                    <p className="text-[8px] font-mono text-white/40 uppercase tracking-widest leading-none">
+                                      Expires
+                                    </p>
+                                    <p className="text-xs font-mono font-bold tracking-wider">
+                                      {checkoutCardExpiry || "MM/YY"}
+                                    </p>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+
+                            <form onSubmit={handleCheckoutSubmit} className="space-y-4">
+                              <div className="space-y-1">
+                                <label className="text-[9px] font-black uppercase tracking-widest text-navy/50 pl-1">
+                                  Cardholder Name
+                                </label>
+                                <input 
+                                  type="text"
+                                  required
+                                  value={checkoutCardName}
+                                  onChange={(e) => setCheckoutCardName(e.target.value)}
+                                  placeholder="e.g. John Doe"
+                                  className="w-full bg-navy/5 border border-navy/10 rounded-2xl px-4 py-3 text-xs font-bold text-navy focus:outline-none focus:border-orange focus:bg-white transition-all"
+                                />
+                              </div>
+
+                              <div className="space-y-1">
+                                <label className="text-[9px] font-black uppercase tracking-widest text-navy/50 pl-1">
+                                  Card Number
+                                </label>
+                                <input 
+                                  type="text"
+                                  required
+                                  maxLength={19}
+                                  value={checkoutCardNo}
+                                  onChange={(e) => {
+                                    const val = e.target.value.replace(/\s?/g, '').replace(/(\d{4})/g, '$1 ').trim();
+                                    setCheckoutCardNo(val);
+                                  }}
+                                  placeholder="4242 4242 4242 4242"
+                                  className="w-full bg-navy/5 border border-navy/10 rounded-2xl px-4 py-3 text-xs font-mono font-bold text-navy focus:outline-none focus:border-orange focus:bg-white transition-all"
+                                />
+                              </div>
+
+                              <div className="grid grid-cols-2 gap-4">
+                                <div className="space-y-1">
+                                  <label className="text-[9px] font-black uppercase tracking-widest text-navy/50 pl-1">
+                                    Expiration Date
+                                  </label>
+                                  <input 
+                                    type="text"
+                                    required
+                                    maxLength={5}
+                                    value={checkoutCardExpiry}
+                                    onChange={(e) => {
+                                      let val = e.target.value.replace(/\//g, '');
+                                      if (val.length > 2) {
+                                        val = val.slice(0, 2) + '/' + val.slice(2);
+                                      }
+                                      setCheckoutCardExpiry(val);
+                                    }}
+                                    placeholder="MM/YY"
+                                    className="w-full bg-navy/5 border border-navy/10 rounded-2xl px-4 py-3 text-xs font-mono font-bold text-navy focus:outline-none focus:border-orange focus:bg-white transition-all text-center"
+                                  />
+                                </div>
+
+                                <div className="space-y-1">
+                                  <label className="text-[9px] font-black uppercase tracking-widest text-navy/50 pl-1">
+                                    Security Code (CVC)
+                                  </label>
+                                  <input 
+                                    type="password"
+                                    required
+                                    maxLength={4}
+                                    value={checkoutCardCVC}
+                                    onChange={(e) => setCheckoutCardCVC(e.target.value.replace(/\D/g, ''))}
+                                    placeholder="•••"
+                                    className="w-full bg-navy/5 border border-navy/10 rounded-2xl px-4 py-3 text-xs font-mono font-bold text-navy focus:outline-none focus:border-orange focus:bg-white transition-all text-center"
+                                  />
+                                </div>
+                              </div>
+
+                              <button
+                                type="submit"
+                                className="w-full bg-navy text-orange hover:bg-navy/95 py-4 rounded-2xl font-black uppercase tracking-widest text-xs transition-all shadow-xl shadow-navy/10 mt-6 flex items-center justify-center gap-2 cursor-pointer"
+                              >
+                                <Lock className="w-3.5 h-3.5" />
+                                Authenticate & Pay {isAnnual ? "$48.00" : "$5.00"}
+                              </button>
+                            </form>
+                          </>
+                        )}
+                      </div>
+                    </motion.div>
+                  </div>
+                )}
+
+                {/* Universal Upgrade Prompt Modal Overlay */}
+                {showUpgradePrompt && (
+                  <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-navy/60 backdrop-blur-md">
+                    <motion.div 
+                      initial={{ scale: 0.95, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                      className="bg-white rounded-[3rem] border border-navy/10 shadow-2xl p-8 max-w-md w-full relative overflow-hidden space-y-6 text-center"
+                    >
+                      <button 
+                        onClick={() => setShowUpgradePrompt(null)}
+                        className="absolute top-6 right-6 p-2 bg-navy/5 rounded-full hover:bg-navy/10 text-navy transition-colors cursor-pointer"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+
+                      <div className="flex flex-col items-center space-y-4">
+                        <div className="relative flex justify-center">
+                          <div className="absolute inset-0 bg-orange/20 blur-2xl rounded-full" />
+                          <div className="bg-navy p-6 rounded-[2rem] relative border border-orange/10 flex items-center justify-center">
+                            <Sparkles className="w-10 h-10 text-orange" />
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          <span className="bg-orange/10 text-orange px-3.5 py-1 rounded-full text-[9px] font-black uppercase tracking-[2px] border border-orange/20">
+                            Premium Access Blocked
+                          </span>
+                          <h3 className="text-2xl font-display font-black uppercase italic tracking-tight text-navy">
+                            UNLOCK {showUpgradePrompt.toUpperCase()}
+                          </h3>
+                          <p className="text-xs text-navy/60 font-semibold leading-relaxed max-w-xs mx-auto">
+                            The requested secure tool is only available for active Premium defenders. Free trial is either uninitiated or expired. Upgrade now to secure your inbox with limitless real-time scanning.
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-col gap-2 pt-2">
+                        <button
+                          onClick={() => {
+                            setShowUpgradePrompt(null);
+                            setView("subscription");
+                            openCheckoutModal("pro");
+                          }}
+                          className="w-full bg-navy text-orange hover:bg-navy/95 py-4 rounded-2xl font-black uppercase tracking-widest text-xs transition-all shadow-xl shadow-navy/10 flex items-center justify-center gap-2 cursor-pointer"
+                        >
+                          <Zap className="w-4 h-4 text-orange fill-current" />
+                          Subscribe & Upgrade Now
+                        </button>
+                        <button
+                          onClick={() => {
+                            setShowUpgradePrompt(null);
+                            setView("subscription");
+                          }}
+                          className="w-full bg-navy/5 text-navy hover:bg-navy/10 py-3.5 rounded-2xl font-black uppercase tracking-widest text-[10px] transition-all cursor-pointer"
+                        >
+                          View Plan Benefits
+                        </button>
+                        <button
+                          onClick={() => setShowUpgradePrompt(null)}
+                          className="w-full text-navy/40 hover:text-navy/60 py-2 text-[9px] font-black uppercase tracking-widest transition-colors cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </motion.div>
+                  </div>
+                )}
+
+                {/* Majestic Live Ticking Countdown Terminal */}
+                {getLiveCountdown() && (
+                  <motion.div 
+                    initial={{ y: -10, opacity: 0 }}
+                    animate={{ y: 0, opacity: 1 }}
+                    className="bg-orange/5 border-2 border-orange/20 rounded-[3rem] p-8 space-y-4 shadow-md text-center relative overflow-hidden"
+                  >
+                    <div className="absolute inset-0 bg-gradient-to-r from-orange/5 to-transparent pointer-events-none" />
+                    <div className="flex flex-col items-center space-y-2">
+                      <div className="flex items-center gap-2">
+                        {subscription.plan !== "free" ? (
+                          <Zap className="w-5 h-5 text-orange fill-current animate-pulse" />
+                        ) : (
+                          <Clock className="w-5 h-5 text-orange animate-spin" style={{ animationDuration: '4s' }} />
+                        )}
+                        <h4 className="text-xs font-black uppercase tracking-[3px] text-navy">
+                          LIVE SECURE STATUS COUNTDOWN
+                        </h4>
+                      </div>
+                      <p className="text-[11px] text-navy/60 font-semibold uppercase tracking-wider">
+                        {getLiveCountdown()?.label} — TIME REMAINING
+                      </p>
+                    </div>
+
+                    {/* Digital Clock Grid */}
+                    <div className="grid grid-cols-4 gap-3 max-w-xs mx-auto">
+                      {[
+                        { val: getLiveCountdown()?.days, unit: "days" },
+                        { val: getLiveCountdown()?.hours, unit: "hours" },
+                        { val: getLiveCountdown()?.minutes, unit: "minutes" },
+                        { val: getLiveCountdown()?.seconds, unit: "seconds" }
+                      ].map((item, idx) => (
+                        <div key={idx} className="bg-navy text-white p-3 rounded-2xl flex flex-col items-center justify-center shadow-lg shadow-navy/15">
+                          <span className="font-mono text-xl font-black text-orange tabular-nums">
+                            {String(item?.val ?? 0).padStart(2, '0')}
+                          </span>
+                          <span className="text-[8px] font-black uppercase tracking-wider text-white/40 mt-1">
+                            {item?.unit}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+
+                    <p className="text-[10px] text-navy/40 font-semibold italic">
+                      {subscription.plan !== "free" 
+                        ? `Your premium license is active and synchronizing with US-EAST, EU-WEST, and AP-SOUTH nodes. Reset occurs on ${subscription.currentPeriodEnd ? new Date(subscription.currentPeriodEnd).toLocaleDateString() : "next cycle"}.`
+                        : "Your 1-week secure trial is ticking down. Upgrade to prevent lockdown of live email audits and support chat."
+                      }
+                    </p>
+                  </motion.div>
+                )}
+
+                {/* Subscription Overview Card */}
+                <div className="bg-navy text-white p-8 rounded-[3rem] space-y-6 shadow-2xl relative overflow-hidden">
+                  <div className="absolute top-0 right-0 p-8 opacity-10">
+                    <Sparkles className="w-24 h-24 rotate-12 text-orange" />
+                  </div>
+
+                  <div className="flex justify-between items-start">
+                    <div>
+                      <p className="text-[9px] font-black uppercase tracking-[3px] text-orange">
+                        CURRENT SUBSCRIPTION LEVEL
+                      </p>
+                      <h3 className="text-3xl font-display font-black uppercase italic tracking-tight">
+                        {subscription.plan === "free" ? "Free Trial" : "Premium Protection"}
+                      </h3>
+                    </div>
+                    <span className="flex items-center gap-1.5 px-4 py-1.5 bg-orange text-navy rounded-full text-[9px] font-black uppercase tracking-widest font-bold">
+                      <Zap className="w-3.5 h-3.5 text-navy fill-current" />
+                      Active
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-6 border-t border-white/10">
+                    <div className="space-y-1.5">
+                      <div className="flex justify-between text-[10px] font-black uppercase tracking-widest">
+                        <span className="text-white/50">Audit Usage limit</span>
+                        <span>{subscription.plan === "free" ? `${subscription.usage} / 50 Standard Scans` : "Unlimited Instant Audits"}</span>
+                      </div>
+                      {subscription.plan === "free" && (
+                        <div className="h-2 bg-white/10 rounded-full overflow-hidden">
+                          <div 
+                            className={cn("h-full rounded-full transition-all duration-500", subscription.usage >= 40 ? "bg-red-500" : "bg-orange")} 
+                            style={{ width: `${Math.min((subscription.usage / 50) * 100, 100)}%` }}
+                          />
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="space-y-1">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-white/50 leading-none">
+                        Payment Instrument
+                      </p>
+                      <p className="text-xs font-mono font-bold flex items-center gap-2 mt-1">
+                        <CreditCard className="w-4 h-4 text-orange" />
+                        {subscription.plan === "free" ? "None (Free Tier)" : subscription.paymentMethod}
+                      </p>
+                    </div>
+                  </div>
+
+                  {subscription.plan !== "free" && (
+                    <div className="pt-4 border-t border-white/10 flex justify-between items-center text-xs font-semibold text-white/70">
+                      <span>Next Renewal Date: {subscription.currentPeriodEnd || "Next cycle"}</span>
+                      <button 
+                        onClick={handleCancelSubscription}
+                        className="text-[9px] font-black uppercase tracking-widest text-red-400 hover:text-red-500 transition-colors cursor-pointer"
+                      >
+                        Cancel Secure Subscription
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Plan Selection Grid */}
+                <div className="space-y-6 pt-8">
+                  <div className="text-center space-y-1">
+                    <div className="flex justify-center">
+                      <span className="bg-orange/10 text-orange border border-orange/15 px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-[3px]">
+                        TRANSPARENT PRICING STRUCTURE
+                      </span>
+                    </div>
+                    <h2 className="text-4xl font-display font-black text-navy text-center tracking-tight mt-4 mb-4">
+                      Plans Tailored to Your Security Scope
+                    </h2>
+                    <p className="text-sm text-navy/60 font-semibold leading-relaxed max-w-xl mx-auto text-center">
+                      Start protecting your email accounts for free. Upgrade to higher tiers as your security needs expand. No lock-in, cancel with a single click.
+                    </p>
+
+                    {/* Monthly vs Annual Toggle */}
+                    <div className="flex items-center justify-center gap-3 py-6">
+                      <span className={cn("text-xs font-bold transition-colors", !isAnnual ? "text-navy" : "text-navy/40")}>
+                        Billed Monthly
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setIsAnnual(!isAnnual)}
+                        className="w-12 h-6 bg-navy rounded-full p-1 transition-all relative focus:outline-none flex items-center cursor-pointer"
+                      >
+                        <div className={cn(
+                          "w-4 h-4 bg-white rounded-full shadow-md transition-transform duration-200 transform",
+                          isAnnual ? "translate-x-6" : "translate-x-0"
+                        )} />
+                      </button>
+                      <span className={cn("text-xs font-bold transition-colors flex items-center gap-1.5", isAnnual ? "text-navy" : "text-navy/40")}>
+                        Billed Annually
+                        <span className="bg-orange/15 text-orange px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider">
+                          SAVE 20%
+                        </span>
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-4xl mx-auto pt-4">
+                    {/* Free Trial Card */}
+                    <div className={cn(
+                      "p-8 rounded-[3rem] border space-y-6 transition-all relative flex flex-col justify-between bg-white",
+                      subscription.plan === "free" 
+                        ? "border-navy/25 shadow-lg" 
+                        : "border-navy/10 hover:border-navy/20"
+                    )}>
+                      <div className="space-y-4">
+                        <div className="space-y-1">
+                          <p className="text-[10px] font-black uppercase tracking-[2px] text-navy/40">
+                            TRIAL PERIOD
+                          </p>
+                          <h4 className="text-2xl font-black text-navy">Free Trial</h4>
+                        </div>
+                        <p className="text-xs text-navy/60 leading-relaxed font-semibold">
+                          Essential email security evaluation and verification tools.
+                        </p>
+                        <div className="flex items-baseline gap-1 pt-2">
+                          <span className="text-5xl font-black text-navy">$0</span>
+                          <span className="text-xs font-bold text-navy/40">/ inbox / mo</span>
+                        </div>
+                        <hr className="border-navy/5" />
+                        <ul className="space-y-3.5 text-xs text-navy/70">
+                          <li className="flex gap-2.5 items-center">
+                            <Check className="w-4 h-4 text-green-500 shrink-0" />
+                            <span className="font-semibold">7-day security trial</span>
+                          </li>
+                          <li className="flex gap-2.5 items-center">
+                            <Check className="w-4 h-4 text-green-500 shrink-0" />
+                            <span className="font-semibold">AI Email Phishing Detector</span>
+                          </li>
+                          <li className="flex gap-2.5 items-center">
+                            <Check className="w-4 h-4 text-green-500 shrink-0" />
+                            <span className="font-semibold">Basic SPF & DKIM record validation</span>
+                          </li>
+                          <li className="flex gap-2.5 items-center">
+                            <Check className="w-4 h-4 text-green-500 shrink-0" />
+                            <span className="font-semibold">Instant security scan reports</span>
+                          </li>
+                          <li className="flex gap-2.5 items-center">
+                            <Check className="w-4 h-4 text-green-500 shrink-0" />
+                            <span className="font-semibold">No credit card required</span>
+                          </li>
+                        </ul>
+                      </div>
+                      
+                      <button 
+                        disabled={subscription.plan === "free"}
+                        onClick={handleDowngradeToFree}
+                        className={cn(
+                          "w-full py-4 rounded-2xl font-black uppercase tracking-widest text-xs transition-all text-center",
+                          subscription.plan === "free"
+                            ? "bg-navy/5 text-navy/30 cursor-default"
+                            : "bg-navy text-white hover:bg-navy/95 cursor-pointer"
+                        )}
+                      >
+                        {subscription.plan === "free" ? "Current Plan" : "START FREE TRIAL"}
+                      </button>
+                    </div>
+
+                    {/* Premium Protection Card */}
+                    <div className={cn(
+                      "p-8 rounded-[3rem] border-2 space-y-6 transition-all relative flex flex-col justify-between bg-white shadow-xl",
+                      subscription.plan === "pro" 
+                        ? "border-orange" 
+                        : "border-orange/60 hover:border-orange"
+                    )}>
+                      {/* Overlaid Badge */}
+                      <div className="absolute top-0 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-orange text-white text-[9px] font-black uppercase tracking-[2px] px-4 py-1.5 rounded-full shadow-md flex items-center gap-1">
+                        <Sparkles className="w-3 h-3 fill-current" />
+                        BEST VALUE
+                      </div>
+
+                      <div className="space-y-4">
+                        <div className="space-y-1 pt-2">
+                          <h4 className="text-2xl font-black text-navy">Premium Protection</h4>
+                        </div>
+                        <p className="text-xs text-navy/60 leading-relaxed font-semibold">
+                          Ultimate continuous real-time cybersecurity shield for your active inboxes.
+                        </p>
+                        <div className="flex items-baseline gap-1 pt-2">
+                          <span className="text-5xl font-black text-navy">${isAnnual ? "4" : "5"}</span>
+                          <span className="text-xs font-bold text-navy/40">/ inbox / mo</span>
+                        </div>
+                        <hr className="border-navy/5" />
+                        <ul className="space-y-3.5 text-xs text-navy/70">
+                          <li className="flex gap-2.5 items-center">
+                            <Check className="w-4 h-4 text-green-500 shrink-0" />
+                            <span className="font-semibold">Unlimited Connected Inboxes</span>
+                          </li>
+                          <li className="flex gap-2.5 items-center">
+                            <Check className="w-4 h-4 text-green-500 shrink-0" />
+                            <span className="font-semibold">Continuous Real-Time Background Monitoring</span>
+                          </li>
+                          <li className="flex gap-2.5 items-center">
+                            <Check className="w-4 h-4 text-green-500 shrink-0" />
+                            <span className="font-semibold">Linguistic Urgency & Coercion Threat Detection</span>
+                          </li>
+                          <li className="flex gap-2.5 items-center">
+                            <Check className="w-4 h-4 text-green-500 shrink-0" />
+                            <span className="font-semibold">Deep Typosquatting Domain Radar</span>
+                          </li>
+                          <li className="flex gap-2.5 items-center">
+                            <Check className="w-4 h-4 text-green-500 shrink-0" />
+                            <span className="font-semibold">Full Secure Admin CPanel access</span>
+                          </li>
+                          <li className="flex gap-2.5 items-center">
+                            <Check className="w-4 h-4 text-green-500 shrink-0" />
+                            <span className="font-semibold">Priority 24/7 support & security team chat</span>
+                          </li>
+                        </ul>
+                      </div>
+                      
+                      <button 
+                        disabled={subscription.plan === "pro"}
+                        onClick={() => openCheckoutModal("pro")}
+                        className={cn(
+                          "w-full py-4 rounded-2xl font-black uppercase tracking-widest text-xs transition-all text-center cursor-pointer text-white",
+                          subscription.plan === "pro"
+                            ? "bg-navy/10 text-navy/30 cursor-default border border-navy/5"
+                            : "bg-orange hover:bg-orange/95 shadow-lg shadow-orange/20"
+                        )}
+                      >
+                        {subscription.plan === "pro" ? "Current Plan" : "UNLOCK PREMIUM SECURITY"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Billing Invoice History */}
+                <div className="space-y-4 bg-navy/[0.02] p-8 rounded-[3rem] border border-navy/10">
+                  <div className="space-y-1">
+                    <h3 className="font-display font-black text-lg italic tracking-tight text-navy uppercase leading-none">
+                      SECURE BILLING REGISTER
+                    </h3>
+                    <p className="text-[9px] font-black uppercase tracking-[3px] text-navy/40">
+                      Archived receipts & invoice records
+                    </p>
+                  </div>
+
+                  {subscription.invoices && subscription.invoices.length === 0 ? (
+                    <div className="py-8 text-center text-xs font-semibold text-navy/40 italic">
+                      No invoices found. Free tier has no transaction history.
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-navy/5 max-h-60 overflow-y-auto pr-2">
+                      {subscription.invoices?.map((inv) => (
+                        <div key={inv.id} className="py-3 flex justify-between items-center text-xs">
+                          <div className="space-y-0.5">
+                            <p className="font-mono font-bold text-navy">{inv.id}</p>
+                            <p className="text-[10px] text-navy/40">{inv.date}</p>
+                          </div>
+                          <div className="flex items-center gap-4">
+                            <span className="font-bold text-navy">{inv.amount}</span>
+                            <span className="px-2.5 py-0.5 bg-green-100 text-green-700 text-[8px] font-black uppercase tracking-widest rounded-full font-bold">
+                              {inv.status}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>

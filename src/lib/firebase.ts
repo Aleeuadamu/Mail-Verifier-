@@ -7,7 +7,7 @@ import {
   getAuth,
   browserPopupRedirectResolver
 } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
+import { initializeFirestore } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 const app = initializeApp(firebaseConfig);
@@ -26,4 +26,8 @@ try {
 }
 
 export const auth = firebaseAuth;
-export const db = getFirestore(app);
+
+// Configure Firestore with long-polling to work reliably in sandboxed/preview iframes.
+export const db = initializeFirestore(app, {
+  experimentalForceLongPolling: true,
+});

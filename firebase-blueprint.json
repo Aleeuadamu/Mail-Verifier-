@@ -10,6 +10,29 @@
         },
         "name": {
           "type": "string"
+        },
+        "subscription": {
+          "type": "object",
+          "properties": {
+            "plan": {
+              "type": "string"
+            },
+            "usage": {
+              "type": "integer"
+            },
+            "paymentMethod": {
+              "type": "string"
+            },
+            "currentPeriodEnd": {
+              "type": "string"
+            },
+            "invoices": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
+          }
         }
       }
     }
