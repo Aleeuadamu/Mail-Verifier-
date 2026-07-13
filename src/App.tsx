@@ -66,27 +66,6 @@ interface GmailMessage {
   };
 }
 
-import { auth, db } from "./lib/firebase";
-import {
-  doc,
-  setDoc,
-  getDoc,
-  getDocs,
-  collection,
-  deleteDoc,
-  serverTimestamp,
-} from "firebase/firestore";
-import {
-  createUserWithEmailAndPassword,
-  signInWithEmailAndPassword,
-  sendPasswordResetEmail,
-  signOut,
-  onAuthStateChanged,
-  GoogleAuthProvider,
-  signInWithPopup,
-  browserPopupRedirectResolver,
-} from "firebase/auth";
-
 import AdminDashboard from "./components/AdminDashboard";
 
 const AppLogo = ({ className = "w-10 h-10" }: { className?: string }) => (
@@ -106,7 +85,7 @@ const AppLogo = ({ className = "w-10 h-10" }: { className?: string }) => (
 );
 
 export default function App() {
-  const [user, setUser] = useState<{ email: string; name: string } | null>(
+  const [user, setUser] = useState<{ email: string; name: string; id: string } | null>(
     null,
   );
   const [inbox, setInbox] = useState<GmailMessage[]>([]);
@@ -271,7 +250,7 @@ export default function App() {
         <div className="p-4 bg-navy/[0.02] border border-navy/10 rounded-2xl text-left space-y-1.5 w-full text-xs font-semibold text-navy/70">
           <div className="flex justify-between">
             <span className="text-navy/40 uppercase text-[9px] font-black tracking-wider">Account ID</span>
-            <span className="font-mono text-[10px]">{auth.currentUser?.uid?.slice(0, 12)}...</span>
+            <span className="font-mono text-[10px]">{user?.id?.slice(0, 12)}...</span>
           </div>
           <div className="flex justify-between">
             <span className="text-navy/40 uppercase text-[9px] font-black tracking-wider">Trial Registered</span>
@@ -381,78 +360,106 @@ export default function App() {
     consent: false,
   });
   const [authError, setAuthError] = useState<string | null>(null);
+  const [isGmailConnected, setIsGmailConnected] = useState<boolean>(false);
   const [showMsgOptions, setShowMsgOptions] = useState(false);
 
-  // Check auth on mount
+  // Check auth and setup OAuth message listener on mount
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (firebaseUser) {
-        setUser({
-          email: firebaseUser.email || "",
-          name: firebaseUser.displayName || "Secure Agent",
-        });
-        setView("inbox");
-        if (!connectingUserRef.current) {
-          fetchInbox(firebaseUser.uid);
-        }
+    const checkAuth = async () => {
+      try {
+        const res = await fetch("/api/auth/me");
+        if (res.ok) {
+          const data = await res.json();
+          if (data.user) {
+            setUser({
+              email: data.user.email,
+              name: data.user.name,
+              id: data.user.id
+            });
+            setView("inbox");
+            setSubscription(data.user.subscription || {
+              plan: "free",
+              usage: 8,
+              paymentMethod: "None",
+              currentPeriodEnd: null,
+              trialStartDate: new Date().toISOString(),
+              invoices: []
+            });
+            
+            // Restore Gmail token from localStorage if available and not expired (within 55 minutes)
+            const storedToken = localStorage.getItem(`gmail_access_token_${data.user.id}`);
+            const storedTimeStr = localStorage.getItem(`gmail_access_token_time_${data.user.id}`);
+            if (storedToken && storedTimeStr) {
+              const elapsed = Date.now() - Number(storedTimeStr);
+              if (elapsed < 3300000) {
+                try {
+                  await fetch("/api/auth/store-token", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ token: storedToken, uid: data.user.id }),
+                  });
+                } catch (err) {
+                  console.error("Failed to restore stored Gmail token to backend:", err);
+                }
+              }
+            }
 
-        // Fetch user subscription from Firestore or initialize
-        try {
-          const userDocRef = doc(db, "users", firebaseUser.uid);
-          const userDocSnap = await getDoc(userDocRef);
-          
-          let subData = {
+            fetchInbox(data.user.id);
+          } else {
+            setUser(null);
+            setView("login");
+            setLoginMode("landing");
+          }
+        } else {
+          setUser(null);
+          setView("login");
+          setLoginMode("landing");
+        }
+      } catch (err) {
+        console.error("Auth check failed:", err);
+        setUser(null);
+        setView("login");
+        setLoginMode("landing");
+      }
+    };
+
+    checkAuth();
+
+    // Listen for postMessage from custom Google OAuth popup
+    const handleOAuthMessage = (event: MessageEvent) => {
+      const origin = event.origin;
+      if (!origin.endsWith(".run.app") && !origin.includes("localhost")) {
+        return;
+      }
+      if (event.data?.type === "OAUTH_AUTH_SUCCESS") {
+        const { token, uid, user: loggedInUser } = event.data;
+        if (token && uid) {
+          localStorage.setItem(`gmail_access_token_${uid}`, token);
+          localStorage.setItem(`gmail_access_token_time_${uid}`, String(Date.now()));
+        }
+        if (loggedInUser) {
+          setUser({
+            email: loggedInUser.email,
+            name: loggedInUser.name,
+            id: loggedInUser.id,
+          });
+          setSubscription(loggedInUser.subscription || {
             plan: "free",
             usage: 8,
             paymentMethod: "None",
             currentPeriodEnd: null,
             trialStartDate: new Date().toISOString(),
             invoices: []
-          };
-
-          if (userDocSnap.exists()) {
-            const data = userDocSnap.data();
-            if (data.subscription) {
-              subData = {
-                ...subData,
-                ...data.subscription
-              };
-              if (!subData.trialStartDate) {
-                subData.trialStartDate = new Date().toISOString();
-              }
-            } else {
-              await setDoc(userDocRef, { subscription: subData }, { merge: true });
-            }
-          } else {
-            await setDoc(userDocRef, { subscription: subData }, { merge: true });
-          }
-          setSubscription(subData);
-        } catch (subErr) {
-          console.warn("Failed to fetch user subscription, using local fallback (client offline/sandbox):", subErr);
+          });
+          setView("inbox");
         }
-
-        try {
-          await setDoc(
-            doc(db, "users", firebaseUser.uid),
-            {
-              email: firebaseUser.email,
-              name: firebaseUser.displayName || "Secure Agent",
-              lastLogin: serverTimestamp(),
-              status: "active",
-            },
-            { merge: true },
-          );
-        } catch (e) {
-          console.warn("Failed to sync user to Firestore (client offline/sandbox):", e);
-        }
-      } else {
-        setUser(null);
-        setView("login");
-        setLoginMode("landing");
+        setIsGmailConnected(true);
+        fetchInbox(uid);
       }
-    });
+    };
 
-    return () => unsub();
+    window.addEventListener("message", handleOAuthMessage);
+    return () => window.removeEventListener("message", handleOAuthMessage);
   }, []);
 
   const fetchRemainingPages = async (
@@ -463,7 +470,7 @@ export default function App() {
   ) => {
     setIsSyncingAll(true);
     let currentPageToken: string | null = initialPageToken;
-    const currentUid = uid || auth.currentUser?.uid;
+    const currentUid = uid || user?.id;
     const headers: Record<string, string> = {};
     if (currentUid) {
       headers["x-firebase-uid"] = currentUid;
@@ -538,7 +545,7 @@ export default function App() {
     const currentSessionId = ++fetchSessionIdRef.current;
     const useLimit = customLimit || 40; // Default to larger initial count
     try {
-      const currentUid = uid || auth.currentUser?.uid;
+      const currentUid = uid || user?.id;
       const headers: Record<string, string> = {};
       if (currentUid) {
         headers["x-firebase-uid"] = currentUid;
@@ -601,6 +608,7 @@ export default function App() {
       if (currentSessionId !== fetchSessionIdRef.current) return;
 
       if (data && Array.isArray(data.messages)) {
+        setIsGmailConnected(true);
         setInbox(data.messages);
         setInboxNextPageToken(data.nextPageToken);
 
@@ -620,12 +628,27 @@ export default function App() {
         data &&
         data.error === "No Gmail token found. Please reconnect Google account."
       ) {
+        setIsGmailConnected(false);
         console.warn("Gmail token missing on server:", data.error);
         setInboxError(data.error);
       } else if (data && data.error) {
+        setIsGmailConnected(false);
         setInboxError(data.error);
       }
     } catch (e: any) {
+      const msgStr = e.message || "";
+      if (
+        msgStr.toLowerCase().includes("token") || 
+        msgStr.toLowerCase().includes("reconnect") || 
+        msgStr.toLowerCase().includes("auth") || 
+        msgStr.toLowerCase().includes("unauthorized") ||
+        msgStr.toLowerCase().includes("credential") ||
+        msgStr.toLowerCase().includes("grant") ||
+        msgStr.toLowerCase().includes("invalid") ||
+        msgStr.toLowerCase().includes("expired")
+      ) {
+        setIsGmailConnected(false);
+      }
       console.warn("Fetch inbox failed", e.message);
       setInboxError(e.message || "Failed to fetch emails.");
     } finally {
@@ -677,50 +700,39 @@ export default function App() {
   const handleConnect = async () => {
     try {
       connectingUserRef.current = true;
-      const provider = new GoogleAuthProvider();
-      provider.addScope("https://www.googleapis.com/auth/gmail.readonly");
-      provider.addScope("https://www.googleapis.com/auth/gmail.send");
-      provider.setCustomParameters({ prompt: "consent" });
-      const result = await signInWithPopup(
-        auth,
-        provider,
-        browserPopupRedirectResolver
+      setAuthError(null);
+      
+      const response = await fetch(`/api/auth/google/url?uid=${user?.id || ""}`);
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || "Failed to generate Google secure login connection URL");
+      }
+      
+      const { url } = await response.json();
+      
+      const authWindow = window.open(
+        url,
+        "gmail_oauth_popup",
+        "width=600,height=700"
       );
-      const credential = GoogleAuthProvider.credentialFromResult(result);
-      const token = credential?.accessToken;
 
-      if (token) {
-        await fetch("/api/auth/store-token", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ token, uid: result.user.uid }),
-        });
-        // Force inbox refresh after token storage is complete
-        await fetchInbox(result.user.uid);
+      if (!authWindow) {
+        alert("Please enable popups for this site to establish your secure Google connection.");
       }
-
-      // The onAuthStateChanged hook catches the login and navigates to inbox
     } catch (err: any) {
-      if (
-        err.code === "auth/cancelled-popup-request" ||
-        err.code === "auth/popup-closed-by-user" ||
-        err.code === "auth/user-cancelled" ||
-        err.message?.includes("cancelled-popup-request") ||
-        err.message?.includes("user-cancelled")
-      ) {
-        setAuthError(
-          "Sign-in cancelled. Please click login again and complete the Google popup.",
-        );
-      } else {
-        setAuthError(err.message || "Google Connection failed");
-      }
+      console.error("Google Connection Failed:", err);
+      setAuthError(err.message || "Google connection failed");
     } finally {
       connectingUserRef.current = false;
     }
   };
 
   const handleLogout = async () => {
-    await signOut(auth);
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } catch (e) {
+      console.warn("Failed to contact logout server, logging out locally:", e);
+    }
     setUser(null);
     setView("login");
   };
@@ -729,12 +741,36 @@ export default function App() {
     e.preventDefault();
     setAuthError(null);
     try {
-      await signInWithEmailAndPassword(
-        auth,
-        authFormData.email,
-        authFormData.password,
-      );
-      // onAuthStateChanged will handle setting the user
+      const response = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: authFormData.email,
+          password: authFormData.password,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || "Login credentials authentication failed");
+      }
+
+      const { user: loggedInUser } = await response.json();
+      setUser({
+        email: loggedInUser.email,
+        name: loggedInUser.name,
+        id: loggedInUser.id,
+      });
+      setView("inbox");
+      setSubscription(loggedInUser.subscription || {
+        plan: "free",
+        usage: 8,
+        paymentMethod: "None",
+        currentPeriodEnd: null,
+        trialStartDate: new Date().toISOString(),
+        invoices: []
+      });
+      fetchInbox(loggedInUser.id);
     } catch (err: any) {
       setAuthError(err.message || "Login failed");
     }
@@ -748,26 +784,46 @@ export default function App() {
     }
     setAuthError(null);
     try {
-      await createUserWithEmailAndPassword(
-        auth,
-        authFormData.email,
-        authFormData.password,
-      );
-      // onAuthStateChanged will handle setting the user
+      const response = await fetch("/api/auth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: authFormData.email,
+          password: authFormData.password,
+          name: authFormData.name || "Secure Agent",
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || "User signup failed");
+      }
+
+      const { user: registeredUser } = await response.json();
+      setUser({
+        email: registeredUser.email,
+        name: registeredUser.name,
+        id: registeredUser.id,
+      });
+      setView("inbox");
+      setSubscription(registeredUser.subscription || {
+        plan: "free",
+        usage: 8,
+        paymentMethod: "None",
+        currentPeriodEnd: null,
+        trialStartDate: new Date().toISOString(),
+        invoices: []
+      });
+      fetchInbox(registeredUser.id);
     } catch (err: any) {
       setAuthError(err.message || "Signup failed");
     }
   };
 
-  const handleForgotPassword = async (e: React.FormEvent) => {
+  const handleForgotPassword = (e: React.FormEvent) => {
     e.preventDefault();
-    try {
-      await sendPasswordResetEmail(auth, authFormData.email);
-      alert("Recovery link sent if account exists.");
-      setLoginMode("login");
-    } catch (err: any) {
-      alert(err.message || "Failed to send recovery link");
-    }
+    alert("Password recovery requested. Standard self-managed password systems require database admin verification. Please ask an admin to reset your credentials.");
+    setLoginMode("login");
   };
 
   const handleAnalyze = async (dataToAnalyze: EmailData) => {
@@ -786,21 +842,42 @@ export default function App() {
       const output = await analyzeEmail(dataToAnalyze, "SINGLE_EMAIL_VIEW");
       setResult(output);
 
-      // Increment usage count and sync to Firestore
+      // Update the inbox feed with the new detailed analysis so it matches the analysis tab
+      setInbox((prev) =>
+        prev.map((m) => {
+          if (m.id === dataToAnalyze.id) {
+            return {
+              ...m,
+              analysis: {
+                classification: output?.ai_risk_engine?.final_risk_classification || m.analysis?.classification,
+                severity: (output?.ai_risk_engine?.threat_score || 0) > 60 ? "High" : (output?.ai_risk_engine?.threat_score || 0) > 30 ? "Medium" : "Low",
+                risk_score: output?.ai_risk_engine?.threat_score || m.analysis?.risk_score,
+                short_reason: output?.summary_markdown ? output.summary_markdown.substring(0, 100) : m.analysis?.short_reason
+              },
+              fullAnalysis: output
+            };
+          }
+          return m;
+        })
+      );
+
+      // Increment usage count and sync to backend
       const newUsage = subscription.usage + 1;
       const updatedSub = { ...subscription, usage: newUsage };
       setSubscription(updatedSub);
       
-      const firebaseUser = auth.currentUser;
-      if (firebaseUser) {
+      if (user?.id) {
         try {
-          await setDoc(
-            doc(db, "users", firebaseUser.uid),
-            { subscription: updatedSub },
-            { merge: true }
-          );
+          await fetch("/api/auth/subscription", {
+            method: "POST",
+            headers: { 
+              "Content-Type": "application/json",
+              "x-firebase-uid": user.id
+            },
+            body: JSON.stringify({ subscription: updatedSub }),
+          });
         } catch (e) {
-          console.warn("Failed to sync updated usage to Firestore (client offline/sandbox):", e);
+          console.warn("Failed to sync updated usage to server:", e);
         }
       }
     } catch (error) {
@@ -885,13 +962,19 @@ export default function App() {
 
       setSubscription(updatedSub);
 
-      const firebaseUser = auth.currentUser;
-      if (firebaseUser) {
-        await setDoc(
-          doc(db, "users", firebaseUser.uid),
-          { subscription: updatedSub },
-          { merge: true }
-        );
+      if (user?.id) {
+        try {
+          await fetch("/api/auth/subscription", {
+            method: "POST",
+            headers: { 
+              "Content-Type": "application/json",
+              "x-firebase-uid": user.id
+            },
+            body: JSON.stringify({ subscription: updatedSub }),
+          });
+        } catch (e) {
+          console.warn("Failed to sync subscription details to server:", e);
+        }
       }
 
       setPaymentTrackerStep(4);
@@ -920,13 +1003,19 @@ export default function App() {
 
       setSubscription(updatedSub);
 
-      const firebaseUser = auth.currentUser;
-      if (firebaseUser) {
-        await setDoc(
-          doc(db, "users", firebaseUser.uid),
-          { subscription: updatedSub },
-          { merge: true }
-        );
+      if (user?.id) {
+        try {
+          await fetch("/api/auth/subscription", {
+            method: "POST",
+            headers: { 
+              "Content-Type": "application/json",
+              "x-firebase-uid": user.id
+            },
+            body: JSON.stringify({ subscription: updatedSub }),
+          });
+        } catch (e) {
+          console.warn("Failed to sync plan downgrade to server:", e);
+        }
       }
 
       alert("Plan changed. Your account has been reverted to the Standard (Free) tier.");
@@ -953,13 +1042,19 @@ export default function App() {
 
       setSubscription(updatedSub);
 
-      const firebaseUser = auth.currentUser;
-      if (firebaseUser) {
-        await setDoc(
-          doc(db, "users", firebaseUser.uid),
-          { subscription: updatedSub },
-          { merge: true }
-        );
+      if (user?.id) {
+        try {
+          await fetch("/api/auth/subscription", {
+            method: "POST",
+            headers: { 
+              "Content-Type": "application/json",
+              "x-firebase-uid": user.id
+            },
+            body: JSON.stringify({ subscription: updatedSub }),
+          });
+        } catch (e) {
+          console.warn("Failed to sync subscription cancellation to server:", e);
+        }
       }
 
       alert("Subscription cancelled successfully. You are now on the Free plan.");
@@ -1074,10 +1169,16 @@ export default function App() {
       },
     ]);
     setFormData(analysisData);
-    setResult(null); // Clear previous analysis
-    setResultTab("message"); // Default to message view
-    setView("result"); // Change view immediately
-    handleAnalyze(analysisData);
+    if ((msg as any).fullAnalysis) {
+      setResult((msg as any).fullAnalysis);
+      setResultTab("message");
+      setView("result");
+    } else {
+      setResult(null); // Clear previous analysis
+      setResultTab("message"); // Default to message view
+      setView("result"); // Change view immediately
+      handleAnalyze(analysisData);
+    }
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1119,7 +1220,7 @@ export default function App() {
 
     setIsSendingEmail(true);
     try {
-      const currentUid = auth.currentUser?.uid;
+      const currentUid = user?.id;
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
       };
@@ -2316,22 +2417,24 @@ export default function App() {
                       Syncing Stream...
                     </span>
                   </div>
-                ) : inbox.length === 0 &&
-                  (!inboxError ||
-                    inboxError.toLowerCase().includes("no gmail token") ||
-                    inboxError.toLowerCase().includes("reconnect")) ? (
+                ) : !isGmailConnected ? (
                   <div className="py-20 flex flex-col items-center gap-6 text-center px-8">
                     <div className="w-16 h-16 bg-navy/5 rounded-3xl flex items-center justify-center">
                       <Mail className="w-8 h-8 text-navy/20" />
                     </div>
                     <div className="space-y-4">
-                      <h3 className="font-display font-black text-xl text-navy uppercase italic italic tracking-tight">
+                      <h3 className="font-display font-black text-xl text-navy uppercase italic tracking-tight">
                         Gmail Connection Required
                       </h3>
                       <p className="text-xs text-navy/50 leading-relaxed font-medium">
                         To scan your communications for threats, you must
                         authorize a secure bridge to your Gmail inbox.
                       </p>
+                      {authError && (
+                        <p className="text-[10px] text-red-500 font-bold text-center uppercase tracking-widest leading-normal">
+                          {authError}
+                        </p>
+                      )}
                       <button
                         onClick={handleConnect}
                         className="w-full bg-navy text-white py-4 rounded-2xl font-black uppercase tracking-widest text-[10px] flex items-center justify-center gap-2 hover:bg-navy/90 transition-all shadow-xl shadow-navy/10"
@@ -2342,24 +2445,18 @@ export default function App() {
                       </button>
                     </div>
                   </div>
-                ) : inbox.length === 0 && inboxError ? (
+                ) : inbox.length === 0 ? (
                   <div className="py-20 text-center space-y-4">
                     <Inbox
-                      className="w-12 h-12 text-navy/10 mx-auto"
+                      className="w-12 h-12 text-navy/20 mx-auto"
                       id="empty-inbox-icon"
                     />
-                    <p className="text-xs font-black uppercase tracking-widest text-navy/20">
-                      Secure stream is unverified (Fetch Interrupted).
+                    <h3 className="font-display font-bold text-lg text-navy uppercase italic">
+                      Stream is Secure
+                    </h3>
+                    <p className="text-xs text-navy/50 leading-relaxed max-w-sm mx-auto">
+                      All clear! No email communications were detected in the selected mailbox category.
                     </p>
-                    <div className="flex justify-center mt-4">
-                      <button
-                        onClick={handleConnect}
-                        className="px-6 py-3 bg-navy/5 text-navy hover:bg-navy/10 text-[10px] font-black uppercase tracking-widest rounded-xl transition-colors flex items-center gap-2"
-                      >
-                        <Shield className="w-4 h-4 text-orange" />
-                        Establish Secure Bridge
-                      </button>
-                    </div>
                   </div>
                 ) : (
                   <div className="space-y-3">

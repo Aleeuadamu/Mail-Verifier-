@@ -2,10 +2,24 @@ import express from "express";
 import { google } from "googleapis";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
+import cookieSession from "cookie-session";
+import bcrypt from "bcryptjs";
+import { dbService } from "./db.js";
 
 dotenv.config();
 
 const app = express();
+
+app.set('trust proxy', 1);
+
+app.use(cookieSession({
+  name: 'session',
+  keys: [process.env.SESSION_SECRET || 'secure-gmail-verifier-session-secret'],
+  maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+  secure: true,
+  sameSite: 'none',
+  httpOnly: true,
+}));
 
 let ai: GoogleGenAI | null = null;
 function getAiClient() {
@@ -37,6 +51,292 @@ GLOBAL RULES - MUST BE STRICTLY ADHERED TO:
 `;
 
 const userGmailTokens: Record<string, string> = {};
+
+function getGmailTokenForUser(uid: string): string | null {
+  let token = userGmailTokens[uid];
+  if (!token) {
+    token = dbService.getGmailToken(uid);
+    if (token) {
+      userGmailTokens[uid] = token;
+    }
+  }
+  return token;
+}
+
+// Custom Local Auth routes
+app.post("/api/auth/register", async (req, res) => {
+  const { email, password, name } = req.body;
+  if (!email || !password || !name) {
+    return res.status(400).json({ error: "Email, password, and name are required" });
+  }
+
+  try {
+    const existingUser = dbService.getUserByEmail(email);
+    if (existingUser) {
+      return res.status(400).json({ error: "An account with this email already exists" });
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    const passwordHash = await bcrypt.hash(password, salt);
+
+    const user = dbService.createUser(email, passwordHash, name);
+    req.session!.userId = user.id;
+
+    res.json({ success: true, user: { id: user.id, email: user.email, name: user.name, subscription: user.subscription } });
+  } catch (error: any) {
+    console.error("Registration error:", error);
+    res.status(500).json({ error: error?.message || "Failed to register user" });
+  }
+});
+
+app.post("/api/auth/login", async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ error: "Email and password are required" });
+  }
+
+  try {
+    const user = dbService.getUserByEmail(email);
+    if (!user) {
+      return res.status(400).json({ error: "Invalid email or password" });
+    }
+
+    const isMatch = await bcrypt.compare(password, user.passwordHash);
+    if (!isMatch) {
+      return res.status(400).json({ error: "Invalid email or password" });
+    }
+
+    req.session!.userId = user.id;
+
+    res.json({ success: true, user: { id: user.id, email: user.email, name: user.name, subscription: user.subscription } });
+  } catch (error: any) {
+    console.error("Login error:", error);
+    res.status(500).json({ error: error?.message || "Failed to login" });
+  }
+});
+
+app.post("/api/auth/logout", (req, res) => {
+  req.session = null;
+  res.json({ success: true });
+});
+
+app.get("/api/auth/me", (req, res) => {
+  const userId = req.session?.userId;
+  if (!userId) {
+    return res.json({ user: null });
+  }
+
+  const user = dbService.getUserById(userId);
+  if (!user) {
+    req.session = null;
+    return res.json({ user: null });
+  }
+
+  res.json({ user: { id: user.id, email: user.email, name: user.name, subscription: user.subscription } });
+});
+
+app.post("/api/auth/subscription", (req, res) => {
+  const userId = req.session?.userId || req.headers['x-firebase-uid'] as string;
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  const { subscription } = req.body;
+  if (!subscription) return res.status(400).json({ error: "Missing subscription data" });
+
+  const updatedUser = dbService.updateUserSubscription(userId, subscription);
+  if (!updatedUser) return res.status(404).json({ error: "User not found" });
+
+  res.json({ success: true, subscription: updatedUser.subscription });
+});
+
+// Admin management endpoints
+app.get("/api/admin/users", (req, res) => {
+  const users = dbService.getAllUsers();
+  const safeUsers = users.map(u => ({
+    id: u.id,
+    email: u.email,
+    name: u.name,
+    subscription: u.subscription,
+    status: u.subscription ? "active" : "inactive"
+  }));
+  res.json(safeUsers);
+});
+
+app.delete("/api/admin/users/:id", (req, res) => {
+  const { id } = req.params;
+  const deleted = dbService.deleteUser(id);
+  if (!deleted) {
+    return res.status(404).json({ error: "User not found" });
+  }
+  res.json({ success: true });
+});
+
+app.get("/api/auth/google/url", (req, res) => {
+  const userId = req.session?.userId || req.query.uid as string;
+  const isLoginFlow = !userId;
+
+  // Construct Redirect URI
+  let appUrl = process.env.APP_URL || `${req.protocol}://${req.get('host')}`;
+  if (appUrl.endsWith("/")) {
+    appUrl = appUrl.slice(0, -1);
+  }
+  const redirectUri = `${appUrl}/auth/callback`;
+
+  const oauth2Client = new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET,
+    redirectUri
+  );
+
+  const scope = [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile"
+  ];
+
+  const authUrl = oauth2Client.generateAuthUrl({
+    access_type: "offline",
+    scope,
+    prompt: "consent",
+    state: isLoginFlow ? "google_login" : userId // pass "google_login" if doing login/signup flow
+  });
+
+  res.json({ url: authUrl });
+});
+
+app.get(["/auth/callback", "/auth/callback/"], async (req, res) => {
+  const { code, state } = req.query;
+  if (!code) {
+    return res.status(400).send("No authentication code received.");
+  }
+
+  let appUrl = process.env.APP_URL || `${req.protocol}://${req.get('host')}`;
+  if (appUrl.endsWith("/")) {
+    appUrl = appUrl.slice(0, -1);
+  }
+  const redirectUri = `${appUrl}/auth/callback`;
+
+  try {
+    const oauth2Client = new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      redirectUri
+    );
+
+    const { tokens } = await oauth2Client.getToken(code as string);
+    const token = tokens.access_token;
+    oauth2Client.setCredentials(tokens);
+
+    let finalUserId: string | null = null;
+    let safeUser: any = null;
+
+    // Check if we are doing a google_login flow or have an existing userId
+    const isLoginFlow = state === "google_login";
+    let targetUserId = isLoginFlow ? null : ((state as string) || req.session?.userId);
+
+    // Fetch user info from Google
+    let email = "";
+    let name = "Secure Agent";
+    try {
+      const oauth = google.oauth2({
+        auth: oauth2Client,
+        version: "v2"
+      });
+      const userInfo = await oauth.userinfo.get();
+      email = userInfo.data.email || "";
+      name = userInfo.data.name || "Secure Agent";
+    } catch (e) {
+      console.error("Failed to get Google user info in callback:", e);
+    }
+
+    if (isLoginFlow || !targetUserId) {
+      if (!email) {
+        return res.status(400).send("Failed to retrieve your email address from Google. Please try again.");
+      }
+      // Check if user already exists in db by email
+      let existingUser = dbService.getUserByEmail(email);
+      if (!existingUser) {
+        // Create user if not registered yet
+        const salt = await bcrypt.genSalt(10);
+        const passwordHash = await bcrypt.hash("google-auth-pwd-" + Math.random().toString(36), salt);
+        existingUser = dbService.createUser(email, passwordHash, name);
+      }
+      finalUserId = existingUser.id;
+      safeUser = {
+        id: existingUser.id,
+        email: existingUser.email,
+        name: existingUser.name,
+        subscription: existingUser.subscription
+      };
+    } else {
+      finalUserId = targetUserId;
+      const existingUser = dbService.getUserById(finalUserId);
+      if (existingUser) {
+        safeUser = {
+          id: existingUser.id,
+          email: existingUser.email,
+          name: existingUser.name,
+          subscription: existingUser.subscription
+        };
+      }
+    }
+
+    if (!finalUserId) {
+      return res.status(400).send("No valid user session or ID found. Please try connecting again.");
+    }
+
+    // Set the cookie session to log them in securely
+    req.session!.userId = finalUserId;
+
+    if (token) {
+      dbService.saveGmailToken(finalUserId, token);
+      
+      // Also store in userGmailTokens in memory to avoid reading from disk on every route call
+      userGmailTokens[finalUserId] = token;
+    }
+
+    res.send(`
+      <html>
+        <head>
+          <title>Google Account Connected</title>
+          <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; background: #0A1128; color: #FFFFFF; margin: 0; text-align: center; }
+            .card { background: #121F42; padding: 40px; border-radius: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); max-width: 400px; border: 1px solid rgba(255, 136, 0, 0.2); }
+            h2 { color: #FF8800; margin-top: 0; text-transform: uppercase; font-style: italic; }
+            p { font-size: 14px; opacity: 0.8; line-height: 1.6; }
+            .spinner { border: 4px solid rgba(255,255,255,0.1); width: 36px; height: 36px; border-radius: 50%; border-left-color: #FF8800; animation: spin 1s linear infinite; margin: 20px auto; }
+            @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <h2>Bridge Established</h2>
+            <p>Your Google account has been safely connected. Finalizing secure mail channels...</p>
+            <div class="spinner"></div>
+            <script>
+              setTimeout(() => {
+                if (window.opener) {
+                  window.opener.postMessage({ 
+                    type: 'OAUTH_AUTH_SUCCESS', 
+                    token: '${token || ""}', 
+                    uid: '${finalUserId}',
+                    user: ${safeUser ? JSON.stringify(safeUser) : 'null'}
+                  }, '*');
+                  window.close();
+                } else {
+                  window.location.href = '/';
+                }
+              }, 1500);
+            </script>
+          </div>
+        </body>
+      </html>
+    `);
+  } catch (error: any) {
+    console.error("Google Auth Callback Error:", error);
+    res.status(500).send("Failed to exchange Google authentication code: " + (error.message || error));
+  }
+});
 
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
@@ -106,7 +406,7 @@ app.post("/api/gmail/send", async (req, res) => {
   const uid = req.headers['x-firebase-uid'] as string;
   if (!uid) return res.status(401).json({ error: "No UID provided" });
 
-  const token = userGmailTokens[uid];
+  const token = getGmailTokenForUser(uid);
   if (!token) return res.status(401).json({ error: "No Gmail token found. Please reconnect Google account." });
 
   const { to, subject, body, attachments } = req.body;
@@ -139,6 +439,7 @@ app.post("/api/auth/store-token", (req, res) => {
   const { token, uid } = req.body;
   if (!token || !uid) return res.status(400).json({ error: "Missing fields" });
   userGmailTokens[uid] = token;
+  dbService.saveGmailToken(uid, token);
   res.json({ success: true });
 });
 
@@ -146,7 +447,7 @@ app.get("/api/gmail/messages", async (req, res) => {
   const uid = req.headers['x-firebase-uid'] as string;
   if (!uid) return res.status(401).json({ error: "No UID provided" });
   
-  const token = userGmailTokens[uid];
+  const token = getGmailTokenForUser(uid);
   if (!token) return res.status(401).json({ error: "No Gmail token found. Please reconnect Google account." });
   
   const client = new google.auth.OAuth2();
@@ -196,8 +497,18 @@ app.get("/api/gmail/messages", async (req, res) => {
       messages,
       nextPageToken: response.data.nextPageToken || null
     });
-  } catch (error) {
+  } catch (error: any) {
     console.error("Gmail fetch error:", error);
+    const errStr = (error?.message || "").toLowerCase();
+    if (
+      errStr.includes("invalid_grant") || 
+      errStr.includes("invalid credentials") || 
+      errStr.includes("invalid key") || 
+      error?.code === 401 || 
+      error?.status === 401
+    ) {
+      return res.status(401).json({ error: "No Gmail token found. Please reconnect Google account." });
+    }
     res.status(500).json({ error: "Failed to fetch emails" });
   }
 });

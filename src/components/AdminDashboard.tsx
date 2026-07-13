@@ -1,8 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { motion } from "motion/react";
 import { Shield, ArrowRight } from "lucide-react";
-import { doc, getDocs, collection, deleteDoc } from "firebase/firestore";
-import { db } from "../lib/firebase";
 
 export default function AdminDashboard() {
   const [adminUsers, setAdminUsers] = useState<any[]>([]);
@@ -11,12 +9,13 @@ export default function AdminDashboard() {
   useEffect(() => {
     const fetchUsers = async () => {
       try {
-        const querySnapshot = await getDocs(collection(db, "users"));
-        const usersList: any[] = [];
-        querySnapshot.forEach((doc) => {
-          usersList.push({ id: doc.id, ...doc.data() });
-        });
-        setAdminUsers(usersList);
+        const response = await fetch("/api/admin/users");
+        if (response.ok) {
+          const usersList = await response.json();
+          setAdminUsers(usersList);
+        } else {
+          console.error("Failed to load admin users");
+        }
       } catch (e) {
         console.error("Error fetching users", e);
       } finally {
@@ -29,8 +28,14 @@ export default function AdminDashboard() {
   const handleDeleteUser = async (id: string) => {
     if (confirm("Delete this user?")) {
       try {
-        await deleteDoc(doc(db, "users", id));
-        setAdminUsers(adminUsers.filter(u => u.id !== id));
+        const response = await fetch(`/api/admin/users/${id}`, {
+          method: "DELETE"
+        });
+        if (response.ok) {
+          setAdminUsers(adminUsers.filter(u => u.id !== id));
+        } else {
+          alert("Failed to delete user");
+        }
       } catch (e) {
         console.error("Error deleting user", e);
       }
