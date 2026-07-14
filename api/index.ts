@@ -53,10 +53,10 @@ GLOBAL RULES - MUST BE STRICTLY ADHERED TO:
 
 const userGmailTokens: Record<string, string> = {};
 
-function getGmailTokenForUser(uid: string): string | null {
+async function getGmailTokenForUser(uid: string): string | null {
   let token = userGmailTokens[uid];
   if (!token) {
-    token = dbService.getGmailToken(uid);
+    token = await dbService.getGmailToken(uid);
     if (token) {
       userGmailTokens[uid] = token;
     }
@@ -65,6 +65,10 @@ function getGmailTokenForUser(uid: string): string | null {
 }
 
 // Custom Local Auth routes
+app.get("/api/health", (req, res) => {
+  res.json({ status: "ok", env: process.env.VERCEL ? "vercel" : "local" });
+});
+
 app.post("/api/auth/register", async (req, res) => {
   const { email, password, name } = req.body;
   if (!email || !password || !name) {
@@ -72,7 +76,7 @@ app.post("/api/auth/register", async (req, res) => {
   }
 
   try {
-    const existingUser = dbService.getUserByEmail(email);
+    const existingUser = await dbService.getUserByEmail(email);
     if (existingUser) {
       return res.status(400).json({ error: "An account with this email already exists" });
     }
@@ -80,7 +84,7 @@ app.post("/api/auth/register", async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(password, salt);
 
-    const user = dbService.createUser(email, passwordHash, name);
+    const user = await dbService.createUser(email, passwordHash, name);
     req.session!.userId = user.id;
 
     res.json({ success: true, user: { id: user.id, email: user.email, name: user.name, subscription: user.subscription } });
@@ -97,7 +101,7 @@ app.post("/api/auth/login", async (req, res) => {
   }
 
   try {
-    const user = dbService.getUserByEmail(email);
+    const user = await dbService.getUserByEmail(email);
     if (!user) {
       return res.status(400).json({ error: "Invalid email or password" });
     }
@@ -121,13 +125,13 @@ app.post("/api/auth/logout", (req, res) => {
   res.json({ success: true });
 });
 
-app.get("/api/auth/me", (req, res) => {
+app.get("/api/auth/me", async (req, res) => {
   const userId = req.session?.userId;
   if (!userId) {
     return res.json({ user: null });
   }
 
-  const user = dbService.getUserById(userId);
+  const user = await dbService.getUserById(userId);
   if (!user) {
     req.session = null;
     return res.json({ user: null });
@@ -136,22 +140,22 @@ app.get("/api/auth/me", (req, res) => {
   res.json({ user: { id: user.id, email: user.email, name: user.name, subscription: user.subscription } });
 });
 
-app.post("/api/auth/subscription", (req, res) => {
+app.post("/api/auth/subscription", async (req, res) => {
   const userId = req.session?.userId || req.headers['x-firebase-uid'] as string;
   if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
   const { subscription } = req.body;
   if (!subscription) return res.status(400).json({ error: "Missing subscription data" });
 
-  const updatedUser = dbService.updateUserSubscription(userId, subscription);
+  const updatedUser = await dbService.updateUserSubscription(userId, subscription);
   if (!updatedUser) return res.status(404).json({ error: "User not found" });
 
   res.json({ success: true, subscription: updatedUser.subscription });
 });
 
 // Admin management endpoints
-app.get("/api/admin/users", (req, res) => {
-  const users = dbService.getAllUsers();
+app.get("/api/admin/users", async (req, res) => {
+  const users = await dbService.getAllUsers();
   const safeUsers = users.map(u => ({
     id: u.id,
     email: u.email,
@@ -162,9 +166,9 @@ app.get("/api/admin/users", (req, res) => {
   res.json(safeUsers);
 });
 
-app.delete("/api/admin/users/:id", (req, res) => {
+app.delete("/api/admin/users/:id", async (req, res) => {
   const { id } = req.params;
-  const deleted = dbService.deleteUser(id);
+  const deleted = await dbService.deleteUser(id);
   if (!deleted) {
     return res.status(404).json({ error: "User not found" });
   }
@@ -255,12 +259,12 @@ app.get(["/auth/callback", "/auth/callback/"], async (req, res) => {
         return res.status(400).send("Failed to retrieve your email address from Google. Please try again.");
       }
       // Check if user already exists in db by email
-      let existingUser = dbService.getUserByEmail(email);
+      let existingUser = await dbService.getUserByEmail(email);
       if (!existingUser) {
         // Create user if not registered yet
         const salt = await bcrypt.genSalt(10);
         const passwordHash = await bcrypt.hash("google-auth-pwd-" + Math.random().toString(36), salt);
-        existingUser = dbService.createUser(email, passwordHash, name);
+        existingUser = await dbService.createUser(email, passwordHash, name);
       }
       finalUserId = existingUser.id;
       safeUser = {
@@ -271,7 +275,7 @@ app.get(["/auth/callback", "/auth/callback/"], async (req, res) => {
       };
     } else {
       finalUserId = targetUserId;
-      const existingUser = dbService.getUserById(finalUserId);
+      const existingUser = await dbService.getUserById(finalUserId);
       if (existingUser) {
         safeUser = {
           id: existingUser.id,
@@ -290,7 +294,7 @@ app.get(["/auth/callback", "/auth/callback/"], async (req, res) => {
     req.session!.userId = finalUserId;
 
     if (token) {
-      dbService.saveGmailToken(finalUserId, token);
+      await dbService.saveGmailToken(finalUserId, token);
       
       // Also store in userGmailTokens in memory to avoid reading from disk on every route call
       userGmailTokens[finalUserId] = token;
@@ -407,7 +411,7 @@ app.post("/api/gmail/send", async (req, res) => {
   const uid = req.headers['x-firebase-uid'] as string;
   if (!uid) return res.status(401).json({ error: "No UID provided" });
 
-  const token = getGmailTokenForUser(uid);
+  const token = await getGmailTokenForUser(uid);
   if (!token) return res.status(401).json({ error: "No Gmail token found. Please reconnect Google account." });
 
   const { to, subject, body, attachments } = req.body;
@@ -436,11 +440,11 @@ app.post("/api/gmail/send", async (req, res) => {
   }
 });
 
-app.post("/api/auth/store-token", (req, res) => {
+app.post("/api/auth/store-token", async (req, res) => {
   const { token, uid } = req.body;
   if (!token || !uid) return res.status(400).json({ error: "Missing fields" });
   userGmailTokens[uid] = token;
-  dbService.saveGmailToken(uid, token);
+  await dbService.saveGmailToken(uid, token);
   res.json({ success: true });
 });
 
@@ -448,7 +452,7 @@ app.get("/api/gmail/messages", async (req, res) => {
   const uid = req.headers['x-firebase-uid'] as string;
   if (!uid) return res.status(401).json({ error: "No UID provided" });
   
-  const token = getGmailTokenForUser(uid);
+  const token = await getGmailTokenForUser(uid);
   if (!token) return res.status(401).json({ error: "No Gmail token found. Please reconnect Google account." });
   
   const client = new google.auth.OAuth2();

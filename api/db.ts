@@ -1,7 +1,21 @@
+import { initializeApp, applicationDefault, getApps } from 'firebase-admin/app';
+import { getFirestore } from 'firebase-admin/firestore';
 import fs from "fs";
 import path from "path";
 
-const DB_FILE = path.join(process.cwd(), "db.json");
+// Load config
+const configPath = path.join(process.cwd(), "firebase-applet-config.json");
+let config: any = {};
+if (fs.existsSync(configPath)) {
+  config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+}
+
+const app = getApps().length === 0 ? initializeApp({
+  credential: applicationDefault(),
+  projectId: config.projectId,
+}) : getApps()[0];
+
+const db = getFirestore(app, config.firestoreDatabaseId || "ai-studio-mailverifier-dc1ff58a-9c34-4891-a598-e435ebb2f5a6");
 
 export interface Subscription {
   plan: string;
@@ -21,70 +35,22 @@ export interface User {
   createdAt: string;
 }
 
-interface DatabaseSchema {
-  users: Record<string, User>;
-  tokens: Record<string, string>;
-}
-
-// Ensure db file exists and is valid
-function initDb() {
-  try {
-    if (!fs.existsSync(DB_FILE)) {
-      const initialData: DatabaseSchema = { users: {}, tokens: {} };
-      fs.writeFileSync(DB_FILE, JSON.stringify(initialData, null, 2), "utf8");
-    } else {
-      // Validate structure
-      const content = fs.readFileSync(DB_FILE, "utf8");
-      JSON.parse(content);
-    }
-  } catch (error) {
-    console.error("Failed to initialize db.json, creating a new one", error);
-    const initialData: DatabaseSchema = { users: {}, tokens: {} };
-    fs.writeFileSync(DB_FILE, JSON.stringify(initialData, null, 2), "utf8");
-  }
-}
-
-initDb();
-
-function readDb(): DatabaseSchema {
-  try {
-    const content = fs.readFileSync(DB_FILE, "utf8");
-    return JSON.parse(content);
-  } catch (error) {
-    console.error("Error reading db.json", error);
-    return { users: {}, tokens: {} };
-  }
-}
-
-function writeDb(data: DatabaseSchema) {
-  try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), "utf8");
-  } catch (error) {
-    console.error("Error writing to db.json", error);
-  }
-}
-
 export const dbService = {
-  getUserByEmail(email: string): User | null {
-    const db = readDb();
+  async getUserByEmail(email: string): Promise<User | null> {
     const normalizedEmail = email.toLowerCase().trim();
-    for (const user of Object.values(db.users)) {
-      if (user.email.toLowerCase().trim() === normalizedEmail) {
-        return user;
-      }
-    }
-    return null;
+    const snapshot = await db.collection("users").where("email", "==", normalizedEmail).limit(1).get();
+    if (snapshot.empty) return null;
+    return snapshot.docs[0].data() as User;
   },
 
-  getUserById(id: string): User | null {
-    const db = readDb();
-    return db.users[id] || null;
+  async getUserById(id: string): Promise<User | null> {
+    const doc = await db.collection("users").doc(id).get();
+    if (!doc.exists) return null;
+    return doc.data() as User;
   },
 
-  createUser(email: string, passwordHash: string, name: string): User {
-    const db = readDb();
+  async createUser(email: string, passwordHash: string, name: string): Promise<User> {
     const id = "usr_" + Math.random().toString(36).substring(2, 11);
-    
     const newUser: User = {
       id,
       email: email.toLowerCase().trim(),
@@ -100,49 +66,44 @@ export const dbService = {
       },
       createdAt: new Date().toISOString()
     };
-
-    db.users[id] = newUser;
-    writeDb(db);
+    await db.collection("users").doc(id).set(newUser);
     return newUser;
   },
 
-  updateUserSubscription(id: string, subscription: Partial<Subscription>): User | null {
-    const db = readDb();
-    const user = db.users[id];
-    if (!user) return null;
-
+  async updateUserSubscription(id: string, subscription: Partial<Subscription>): Promise<User | null> {
+    const userRef = db.collection("users").doc(id);
+    const doc = await userRef.get();
+    if (!doc.exists) return null;
+    
+    const user = doc.data() as User;
     user.subscription = {
       ...user.subscription,
       ...subscription
     };
-
-    db.users[id] = user;
-    writeDb(db);
+    await userRef.set(user);
     return user;
   },
 
-  saveGmailToken(id: string, token: string) {
-    const db = readDb();
-    db.tokens[id] = token;
-    writeDb(db);
+  async saveGmailToken(id: string, token: string): Promise<void> {
+    await db.collection("tokens").doc(id).set({ token });
   },
 
-  getGmailToken(id: string): string | null {
-    const db = readDb();
-    return db.tokens[id] || null;
+  async getGmailToken(id: string): Promise<string | null> {
+    const doc = await db.collection("tokens").doc(id).get();
+    if (!doc.exists) return null;
+    return doc.data()?.token || null;
   },
 
-  getAllUsers(): User[] {
-    const db = readDb();
-    return Object.values(db.users);
+  async getAllUsers(): Promise<User[]> {
+    const snapshot = await db.collection("users").get();
+    return snapshot.docs.map(doc => doc.data() as User);
   },
 
-  deleteUser(id: string): boolean {
-    const db = readDb();
-    if (!db.users[id]) return false;
-    delete db.users[id];
-    delete db.tokens[id]; // clean up token as well
-    writeDb(db);
+  async deleteUser(id: string): Promise<boolean> {
+    const doc = await db.collection("users").doc(id).get();
+    if (!doc.exists) return false;
+    await db.collection("users").doc(id).delete();
+    await db.collection("tokens").doc(id).delete();
     return true;
   }
 };

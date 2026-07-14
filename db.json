@@ -1,0 +1,37 @@
+{
+  "users": {
+    "usr_b0la9gu82": {
+      "id": "usr_b0la9gu82",
+      "email": "adamu0533@gmail.com",
+      "passwordHash": "$2b$10$P6KKZQrRsCLKcV8eJj2jEOIE4EjsVkDCH4ZIAfUXJ2W7JTeDw7Fjq",
+      "name": "Aliyu Adamu",
+      "subscription": {
+        "plan": "free",
+        "usage": 0,
+        "paymentMethod": "None",
+        "currentPeriodEnd": null,
+        "trialStartDate": "2026-07-14T09:23:40.700Z",
+        "invoices": []
+      },
+      "createdAt": "2026-07-14T09:23:40.700Z"
+    },
+    "usr_dj3zt0xqy": {
+      "id": "usr_dj3zt0xqy",
+      "email": "test@example.com",
+      "passwordHash": "$2b$10$0yUeTxfyHz75oWEdnjhMWOQ0jgBZOEd5TOUFBI76bkH6jpyIMUL5e",
+      "name": "Test User",
+      "subscription": {
+        "plan": "free",
+        "usage": 0,
+        "paymentMethod": "None",
+        "currentPeriodEnd": null,
+        "trialStartDate": "2026-07-14T09:36:51.724Z",
+        "invoices": []
+      },
+      "createdAt": "2026-07-14T09:36:51.724Z"
+    }
+  },
+  "tokens": {
+    "usr_b0la9gu82": "ya29.a0ARGnu0b_EJv7kLxqHzcDb_X8gkJxpABDinJl1IpBICqxne-8eEy8fp10f4KInnwY_wq_AHaNm-hufF7vnsZ2uDallm79YRkfkZAt1d9idHQ-6GvQQjtvt5nZFmLZ8MYIZQytsOtV13klWW4jLe1Oek83CMjCYIGDRGR7EOVW4B-xVrG5RMT9p_-wza87yKMudVY-GNEaCgYKAVESARQSFQHGX2Mi1OPtq59LXKEX0wgvcWpffQ0206"
+  }
+}

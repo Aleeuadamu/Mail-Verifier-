@@ -1,9 +1,11 @@
 {
-  "projectId": "gen-lang-client-0797647188",
-  "appId": "1:989894319180:web:86bf1070969e82fdfd68e9",
-  "apiKey": "AIzaSyBZZ1C_yVaRlEdYBZBxKe4vNz5mhRGeWow",
-  "authDomain": "gen-lang-client-0797647188.firebaseapp.com",
-  "storageBucket": "gen-lang-client-0797647188.firebasestorage.app",
-  "messagingSenderId": "989894319180",
-  "measurementId": ""
+  "projectId": "mail-verifier-498618",
+  "appId": "1:888166105471:web:126c61ddb640c31ec91a4a",
+  "apiKey": "AIzaSyCqdWYKHgN297Yw-31SSYF8BC1BDTgRhHk",
+  "authDomain": "mail-verifier-498618.firebaseapp.com",
+  "firestoreDatabaseId": "ai-studio-mailverifier-dc1ff58a-9c34-4891-a598-e435ebb2f5a6",
+  "storageBucket": "mail-verifier-498618.firebasestorage.app",
+  "messagingSenderId": "888166105471",
+  "measurementId": "",
+  "oAuthClientId": "888166105471-040vvlefsrde1vs0mlfefn67p2fhgn8s.apps.googleusercontent.com"
 }
