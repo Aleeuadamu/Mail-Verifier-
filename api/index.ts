@@ -53,7 +53,7 @@ GLOBAL RULES - MUST BE STRICTLY ADHERED TO:
 
 const userGmailTokens: Record<string, string> = {};
 
-async function getGmailTokenForUser(uid: string): string | null {
+async function getGmailTokenForUser(uid: string): Promise<string | null> {
   let token = userGmailTokens[uid];
   if (!token) {
     token = await dbService.getGmailToken(uid);
@@ -184,7 +184,8 @@ app.get("/api/auth/google/url", (req, res) => {
   if (appUrl.endsWith("/")) {
     appUrl = appUrl.slice(0, -1);
   }
-  const redirectUri = `${appUrl}/auth/callback`;
+  // Use /api/auth/callback to align with GOOGLE_API_SETUP.md and solve redirect_uri_mismatch
+  const redirectUri = `${appUrl}/api/auth/callback`;
 
   const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
@@ -209,7 +210,7 @@ app.get("/api/auth/google/url", (req, res) => {
   res.json({ url: authUrl });
 });
 
-app.get(["/auth/callback", "/auth/callback/"], async (req, res) => {
+app.get(["/auth/callback", "/auth/callback/", "/api/auth/callback", "/api/auth/callback/"], async (req, res) => {
   const { code, state } = req.query;
   if (!code) {
     return res.status(400).send("No authentication code received.");
@@ -219,7 +220,9 @@ app.get(["/auth/callback", "/auth/callback/"], async (req, res) => {
   if (appUrl.endsWith("/")) {
     appUrl = appUrl.slice(0, -1);
   }
-  const redirectUri = `${appUrl}/auth/callback`;
+  // Determine path to match the current request path (either /auth/callback or /api/auth/callback)
+  const pathUsed = req.path.includes("/api/") ? "/api/auth/callback" : "/auth/callback";
+  const redirectUri = `${appUrl}${pathUsed}`;
 
   try {
     const oauth2Client = new google.auth.OAuth2(

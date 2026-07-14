@@ -10,12 +10,26 @@ if (fs.existsSync(configPath)) {
   config = JSON.parse(fs.readFileSync(configPath, "utf8"));
 }
 
-const app = getApps().length === 0 ? initializeApp({
-  credential: applicationDefault(),
-  projectId: config.projectId,
-}) : getApps()[0];
+let db: any = null;
 
-const db = getFirestore(app, config.firestoreDatabaseId || "ai-studio-mailverifier-dc1ff58a-9c34-4891-a598-e435ebb2f5a6");
+try {
+  const app = getApps().length === 0 ? initializeApp({
+    credential: applicationDefault(),
+    projectId: config.projectId,
+  }) : getApps()[0];
+
+  db = getFirestore(app, config.firestoreDatabaseId || "ai-studio-mailverifier-dc1ff58a-9c34-4891-a598-e435ebb2f5a6");
+
+  // Verify permissions asynchronously on startup, and disable Firestore if they're missing
+  db.collection("_connection_test").limit(1).get().then(() => {
+    console.log("Firestore connection verified successfully.");
+  }).catch((err: any) => {
+    console.warn("Firestore connection check failed, disabling Firestore and using local database fallback:", err.message);
+    db = null;
+  });
+} catch (err: any) {
+  console.warn("Failed to initialize Firestore Admin client, falling back to local database:", err.message);
+}
 
 export interface Subscription {
   plan: string;
@@ -35,21 +49,46 @@ export interface User {
   createdAt: string;
 }
 
-export const dbService = {
-  async getUserByEmail(email: string): Promise<User | null> {
-    const normalizedEmail = email.toLowerCase().trim();
-    const snapshot = await db.collection("users").where("email", "==", normalizedEmail).limit(1).get();
-    if (snapshot.empty) return null;
-    return snapshot.docs[0].data() as User;
+const DB_FILE = path.join(process.cwd(), "db.json");
+
+function readLocalDb(): any {
+  try {
+    if (fs.existsSync(DB_FILE)) {
+      return JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
+    }
+  } catch (err) {
+    console.error("Failed to read local DB:", err);
+  }
+  return { users: {}, tokens: {} };
+}
+
+function writeLocalDb(data: any) {
+  try {
+    fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), "utf8");
+  } catch (err) {
+    console.error("Failed to write local DB:", err);
+  }
+}
+
+const localDb = {
+  getUserByEmail(email: string): User | null {
+    const data = readLocalDb();
+    const normalized = email.toLowerCase().trim();
+    for (const id in data.users) {
+      if (data.users[id].email === normalized) {
+        return data.users[id];
+      }
+    }
+    return null;
   },
 
-  async getUserById(id: string): Promise<User | null> {
-    const doc = await db.collection("users").doc(id).get();
-    if (!doc.exists) return null;
-    return doc.data() as User;
+  getUserById(id: string): User | null {
+    const data = readLocalDb();
+    return data.users[id] || null;
   },
 
-  async createUser(email: string, passwordHash: string, name: string): Promise<User> {
+  createUser(email: string, passwordHash: string, name: string): User {
+    const data = readLocalDb();
     const id = "usr_" + Math.random().toString(36).substring(2, 11);
     const newUser: User = {
       id,
@@ -66,44 +105,186 @@ export const dbService = {
       },
       createdAt: new Date().toISOString()
     };
-    await db.collection("users").doc(id).set(newUser);
+    data.users[id] = newUser;
+    writeLocalDb(data);
     return newUser;
   },
 
-  async updateUserSubscription(id: string, subscription: Partial<Subscription>): Promise<User | null> {
-    const userRef = db.collection("users").doc(id);
-    const doc = await userRef.get();
-    if (!doc.exists) return null;
-    
-    const user = doc.data() as User;
-    user.subscription = {
-      ...user.subscription,
+  updateUserSubscription(id: string, subscription: Partial<Subscription>): User | null {
+    const data = readLocalDb();
+    if (!data.users[id]) return null;
+    data.users[id].subscription = {
+      ...data.users[id].subscription,
       ...subscription
     };
-    await userRef.set(user);
-    return user;
+    writeLocalDb(data);
+    return data.users[id];
+  },
+
+  saveGmailToken(id: string, token: string) {
+    const data = readLocalDb();
+    if (!data.tokens) data.tokens = {};
+    data.tokens[id] = token;
+    writeLocalDb(data);
+  },
+
+  getGmailToken(id: string): string | null {
+    const data = readLocalDb();
+    if (!data.tokens) return null;
+    return data.tokens[id] || null;
+  },
+
+  getAllUsers(): User[] {
+    const data = readLocalDb();
+    return Object.values(data.users);
+  },
+
+  deleteUser(id: string): boolean {
+    const data = readLocalDb();
+    if (!data.users[id]) return false;
+    delete data.users[id];
+    if (data.tokens && data.tokens[id]) {
+      delete data.tokens[id];
+    }
+    writeLocalDb(data);
+    return true;
+  }
+};
+
+export const dbService = {
+  async getUserByEmail(email: string): Promise<User | null> {
+    const normalizedEmail = email.toLowerCase().trim();
+    if (!db) {
+      return localDb.getUserByEmail(normalizedEmail);
+    }
+    try {
+      const snapshot = await db.collection("users").where("email", "==", normalizedEmail).limit(1).get();
+      if (snapshot.empty) return null;
+      return snapshot.docs[0].data() as User;
+    } catch (e: any) {
+      console.warn("Firestore error in getUserByEmail, falling back to local DB:", e.message);
+      return localDb.getUserByEmail(normalizedEmail);
+    }
+  },
+
+  async getUserById(id: string): Promise<User | null> {
+    if (!db) {
+      return localDb.getUserById(id);
+    }
+    try {
+      const doc = await db.collection("users").doc(id).get();
+      if (!doc.exists) return null;
+      return doc.data() as User;
+    } catch (e: any) {
+      console.warn("Firestore error in getUserById, falling back to local DB:", e.message);
+      return localDb.getUserById(id);
+    }
+  },
+
+  async createUser(email: string, passwordHash: string, name: string): Promise<User> {
+    if (!db) {
+      return localDb.createUser(email, passwordHash, name);
+    }
+    const id = "usr_" + Math.random().toString(36).substring(2, 11);
+    const newUser: User = {
+      id,
+      email: email.toLowerCase().trim(),
+      passwordHash,
+      name: name.trim(),
+      subscription: {
+        plan: "free",
+        usage: 0,
+        paymentMethod: "None",
+        currentPeriodEnd: null,
+        trialStartDate: new Date().toISOString(),
+        invoices: []
+      },
+      createdAt: new Date().toISOString()
+    };
+    try {
+      await db.collection("users").doc(id).set(newUser);
+      return newUser;
+    } catch (e: any) {
+      console.warn("Firestore error in createUser, falling back to local DB:", e.message);
+      return localDb.createUser(email, passwordHash, name);
+    }
+  },
+
+  async updateUserSubscription(id: string, subscription: Partial<Subscription>): Promise<User | null> {
+    if (!db) {
+      return localDb.updateUserSubscription(id, subscription);
+    }
+    try {
+      const userRef = db.collection("users").doc(id);
+      const doc = await userRef.get();
+      if (!doc.exists) return null;
+      
+      const user = doc.data() as User;
+      user.subscription = {
+        ...user.subscription,
+        ...subscription
+      };
+      await userRef.set(user);
+      return user;
+    } catch (e: any) {
+      console.warn("Firestore error in updateUserSubscription, falling back to local DB:", e.message);
+      return localDb.updateUserSubscription(id, subscription);
+    }
   },
 
   async saveGmailToken(id: string, token: string): Promise<void> {
-    await db.collection("tokens").doc(id).set({ token });
+    if (!db) {
+      localDb.saveGmailToken(id, token);
+      return;
+    }
+    try {
+      await db.collection("tokens").doc(id).set({ token });
+    } catch (e: any) {
+      console.warn("Firestore error in saveGmailToken, falling back to local DB:", e.message);
+      localDb.saveGmailToken(id, token);
+    }
   },
 
   async getGmailToken(id: string): Promise<string | null> {
-    const doc = await db.collection("tokens").doc(id).get();
-    if (!doc.exists) return null;
-    return doc.data()?.token || null;
+    if (!db) {
+      return localDb.getGmailToken(id);
+    }
+    try {
+      const doc = await db.collection("tokens").doc(id).get();
+      if (!doc.exists) return null;
+      return doc.data()?.token || null;
+    } catch (e: any) {
+      console.warn("Firestore error in getGmailToken, falling back to local DB:", e.message);
+      return localDb.getGmailToken(id);
+    }
   },
 
   async getAllUsers(): Promise<User[]> {
-    const snapshot = await db.collection("users").get();
-    return snapshot.docs.map(doc => doc.data() as User);
+    if (!db) {
+      return localDb.getAllUsers();
+    }
+    try {
+      const snapshot = await db.collection("users").get();
+      return snapshot.docs.map(doc => doc.data() as User);
+    } catch (e: any) {
+      console.warn("Firestore error in getAllUsers, falling back to local DB:", e.message);
+      return localDb.getAllUsers();
+    }
   },
 
   async deleteUser(id: string): Promise<boolean> {
-    const doc = await db.collection("users").doc(id).get();
-    if (!doc.exists) return false;
-    await db.collection("users").doc(id).delete();
-    await db.collection("tokens").doc(id).delete();
-    return true;
+    if (!db) {
+      return localDb.deleteUser(id);
+    }
+    try {
+      const doc = await db.collection("users").doc(id).get();
+      if (!doc.exists) return false;
+      await db.collection("users").doc(id).delete();
+      await db.collection("tokens").doc(id).delete().catch(() => {});
+      return true;
+    } catch (e: any) {
+      console.warn("Firestore error in deleteUser, falling back to local DB:", e.message);
+      return localDb.deleteUser(id);
+    }
   }
 };

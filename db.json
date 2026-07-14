@@ -29,6 +29,21 @@
         "invoices": []
       },
       "createdAt": "2026-07-14T09:36:51.724Z"
+    },
+    "usr_qizjgaidq": {
+      "id": "usr_qizjgaidq",
+      "email": "test2@example.com",
+      "passwordHash": "$2b$10$6dNkGmwGSBp4z9yzE./XC.OxJwnZG0qPylDRj3k6OfN1RVxd/BBqG",
+      "name": "Test User 2",
+      "subscription": {
+        "plan": "free",
+        "usage": 0,
+        "paymentMethod": "None",
+        "currentPeriodEnd": null,
+        "trialStartDate": "2026-07-14T11:01:13.766Z",
+        "invoices": []
+      },
+      "createdAt": "2026-07-14T11:01:13.766Z"
     }
   },
   "tokens": {
