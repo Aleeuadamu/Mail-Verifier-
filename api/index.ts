@@ -8,14 +8,34 @@ import { dbService } from "./db.js";
 
 dotenv.config();
 
+import cors from "cors";
+import rateLimit from "express-rate-limit";
+
 const app = express();
 
 app.set('trust proxy', 1);
+
+app.use(cors({
+  origin: process.env.APP_URL || true,
+  credentials: true
+}));
+
 app.use(express.json());
+
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per `window` (here, per 15 minutes)
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+app.use("/api/", apiLimiter);
+
+import crypto from "crypto";
 
 app.use(cookieSession({
   name: 'session',
-  keys: [process.env.SESSION_SECRET || 'secure-gmail-verifier-session-secret'],
+  keys: [process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex')],
   maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
   secure: true,
   sameSite: 'none',
@@ -141,7 +161,7 @@ app.get("/api/auth/me", async (req, res) => {
 });
 
 app.post("/api/auth/subscription", async (req, res) => {
-  const userId = req.session?.userId || req.headers['x-firebase-uid'] as string;
+  const userId = req.session?.userId;
   if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
   const { subscription } = req.body;
@@ -155,6 +175,7 @@ app.post("/api/auth/subscription", async (req, res) => {
 
 // Admin management endpoints
 app.get("/api/admin/users", async (req, res) => {
+  if (!req.session?.userId) return res.status(401).json({ error: "Unauthorized" });
   const users = await dbService.getAllUsers();
   const safeUsers = users.map(u => ({
     id: u.id,
@@ -167,6 +188,7 @@ app.get("/api/admin/users", async (req, res) => {
 });
 
 app.delete("/api/admin/users/:id", async (req, res) => {
+  if (!req.session?.userId) return res.status(401).json({ error: "Unauthorized" });
   const { id } = req.params;
   const deleted = await dbService.deleteUser(id);
   if (!deleted) {
@@ -411,7 +433,7 @@ function buildMimeMessage({
 }
 
 app.post("/api/gmail/send", async (req, res) => {
-  const uid = req.headers['x-firebase-uid'] as string;
+  const uid = req.session?.userId;
   if (!uid) return res.status(401).json({ error: "No UID provided" });
 
   const token = await getGmailTokenForUser(uid);
@@ -444,15 +466,16 @@ app.post("/api/gmail/send", async (req, res) => {
 });
 
 app.post("/api/auth/store-token", async (req, res) => {
-  const { token, uid } = req.body;
-  if (!token || !uid) return res.status(400).json({ error: "Missing fields" });
+  const uid = req.session?.userId;
+  const { token } = req.body;
+  if (!token || !uid) return res.status(400).json({ error: "Missing fields or unauthorized" });
   userGmailTokens[uid] = token;
   await dbService.saveGmailToken(uid, token);
   res.json({ success: true });
 });
 
 app.get("/api/gmail/messages", async (req, res) => {
-  const uid = req.headers['x-firebase-uid'] as string;
+  const uid = req.session?.userId;
   if (!uid) return res.status(401).json({ error: "No UID provided" });
   
   const token = await getGmailTokenForUser(uid);
@@ -522,6 +545,9 @@ app.get("/api/gmail/messages", async (req, res) => {
 });
 
 app.post("/api/analyze", async (req, res) => {
+  const uid = req.session?.userId;
+  if (!uid) return res.status(401).json({ error: "Unauthorized" });
+
   const { data, mode } = req.body;
   if (!data || !mode) return res.status(400).json({ error: "Missing data or mode" });
 
@@ -709,6 +735,9 @@ Expected JSON Schema:
 });
 
 app.post("/api/chat-message", async (req, res) => {
+  const uid = req.session?.userId;
+  if (!uid) return res.status(401).json({ error: "Unauthorized" });
+
   const { messageContext, history, question } = req.body;
   if (!question || !messageContext) {
     return res.status(400).json({ error: "Missing required fields" });

@@ -1,4 +1,4 @@
-import { initializeApp, applicationDefault, getApps } from 'firebase-admin/app';
+import { initializeApp, applicationDefault, getApps, cert } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import fs from "fs";
 import path from "path";
@@ -13,20 +13,51 @@ if (fs.existsSync(configPath)) {
 let db: any = null;
 
 try {
-  const app = getApps().length === 0 ? initializeApp({
-    credential: applicationDefault(),
-    projectId: config.projectId,
-  }) : getApps()[0];
+  let credential: any = null;
 
-  db = getFirestore(app, config.firestoreDatabaseId || "ai-studio-mailverifier-dc1ff58a-9c34-4891-a598-e435ebb2f5a6");
+  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    try {
+      const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+      credential = cert(serviceAccount);
+      console.log("Using credentials from FIREBASE_SERVICE_ACCOUNT environment variable.");
+    } catch (e: any) {
+      console.warn("Failed to parse FIREBASE_SERVICE_ACCOUNT JSON:", e.message);
+    }
+  } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON) {
+    try {
+      const serviceAccount = JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON);
+      credential = cert(serviceAccount);
+      console.log("Using credentials from GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable.");
+    } catch (e: any) {
+      console.warn("Failed to parse GOOGLE_APPLICATION_CREDENTIALS_JSON JSON:", e.message);
+    }
+  } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+    credential = applicationDefault();
+    console.log("Using credentials from GOOGLE_APPLICATION_CREDENTIALS file path.");
+  } else if (process.env.K_SERVICE) {
+    // We are running inside Google Cloud (e.g. Cloud Run in AI Studio sandbox), so ADC is available
+    credential = applicationDefault();
+    console.log("Using Google Application Default Credentials (running in Cloud environment).");
+  }
 
-  // Verify permissions asynchronously on startup, and disable Firestore if they're missing
-  db.collection("_connection_test").limit(1).get().then(() => {
-    console.log("Firestore connection verified successfully.");
-  }).catch((err: any) => {
-    console.warn("Firestore connection check failed, disabling Firestore and using local database fallback:", err.message);
-    db = null;
-  });
+  if (credential) {
+    const app = getApps().length === 0 ? initializeApp({
+      credential,
+      projectId: config.projectId,
+    }) : getApps()[0];
+
+    db = getFirestore(app, config.firestoreDatabaseId || "ai-studio-mailverifier-dc1ff58a-9c34-4891-a598-e435ebb2f5a6");
+
+    // Verify permissions asynchronously on startup, and disable Firestore if they're missing
+    db.collection("_connection_test").limit(1).get().then(() => {
+      console.log("Firestore connection verified successfully.");
+    }).catch((err: any) => {
+      console.warn("Firestore connection check failed, disabling Firestore and using local database fallback:", err.message);
+      db = null;
+    });
+  } else {
+    console.warn("No Google Cloud credentials detected. Firestore is disabled; falling back to local database (db.json).");
+  }
 } catch (err: any) {
   console.warn("Failed to initialize Firestore Admin client, falling back to local database:", err.message);
 }
