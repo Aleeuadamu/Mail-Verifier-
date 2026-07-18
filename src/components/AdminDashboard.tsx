@@ -72,12 +72,16 @@ export default function AdminDashboard() {
   };
 
   const handleDownload = () => {
+    if (!confirm("Are you sure you want to download the users' details?")) {
+      return;
+    }
     const rows = [
-      ["Name", "Email", "Contact"],
+      ["Name", "Email", "Contact", "Plan"],
       ...adminUsers.map(u => [
         `"${u.name || 'Unknown'}"`,
         `"${u.email || 'N/A'}"`,
-        `"${u.contact || 'N/A'}"`
+        `"${u.contact || 'N/A'}"`,
+        `"${u.subscription?.plan || 'free'}"`
       ])
     ];
     const csvContent = "data:text/csv;charset=utf-8," + encodeURIComponent(rows.map(e => e.join(",")).join("\n"));
@@ -90,6 +94,8 @@ export default function AdminDashboard() {
   };
 
   const activeCount = adminUsers.filter(u => u.status === 'active').length;
+  const freeCount = adminUsers.filter(u => !u.subscription || u.subscription.plan === 'free').length;
+  const paidCount = adminUsers.filter(u => u.subscription && u.subscription.plan !== 'free').length;
 
   return (
     <motion.div
@@ -112,14 +118,14 @@ export default function AdminDashboard() {
           <span className="text-2xl font-display font-black text-navy">{adminUsers.length}</span>
         </div>
         <div className="p-4 bg-navy/[0.03] rounded-2xl border border-navy/10 flex flex-col items-center">
-          <span className="text-[10px] font-black uppercase tracking-widest text-navy/40 mb-1">Active Agents</span>
-          <span className="text-2xl font-display font-black text-orange">{activeCount}</span>
+          <span className="text-[10px] font-black uppercase tracking-widest text-navy/40 mb-1">Paid Users</span>
+          <span className="text-2xl font-display font-black text-orange">{paidCount}</span>
         </div>
         <div className="p-4 bg-navy/[0.03] rounded-2xl border border-navy/10 flex flex-col items-center">
-          <span className="text-[10px] font-black uppercase tracking-widest text-navy/40 mb-1">Passive Agents</span>
-          <span className="text-2xl font-display font-black text-navy">{adminUsers.length - activeCount}</span>
+          <span className="text-[10px] font-black uppercase tracking-widest text-navy/40 mb-1">Free Users</span>
+          <span className="text-2xl font-display font-black text-navy">{freeCount}</span>
         </div>
-        <button onClick={handleDownload} className="p-4 bg-orange/10 rounded-2xl border border-orange/20 flex flex-col items-center justify-center hover:bg-orange/20 transition-all text-orange">
+        <button onClick={handleDownload} className="p-4 bg-orange/10 rounded-2xl border border-orange/20 flex flex-col items-center justify-center hover:bg-orange/20 transition-all text-orange cursor-pointer">
           <span className="text-[10px] font-black uppercase tracking-widest mb-1">Export Users</span>
           <ArrowRight className="w-6 h-6 rotate-90" />
         </button>
@@ -141,12 +147,17 @@ export default function AdminDashboard() {
                       <span className="text-orange font-bold font-display uppercase">{u.name?.charAt(0) || "X"}</span>
                     </div>
                     <div>
-                      <p className="font-black text-sm text-navy tracking-tight">{u.name || "Unknown Agent"}</p>
+                      <div className="flex items-center gap-2">
+                        <p className="font-black text-sm text-navy tracking-tight">{u.name || "Unknown Agent"}</p>
+                        <span className={`px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-full ${!u.subscription || u.subscription.plan === 'free' ? 'bg-navy/10 text-navy' : 'bg-orange/10 text-orange'}`}>
+                          {!u.subscription || u.subscription.plan === 'free' ? 'FREE' : 'PAID'}
+                        </span>
+                      </div>
                       <p className="text-[10px] font-mono tracking-tighter text-navy/50">{u.email}</p>
                       <p className="text-[10px] font-mono tracking-tighter text-navy/40">{u.contact || "No Contact Info"}</p>
                     </div>
                   </div>
-                  <button onClick={() => handleDeleteUser(u.id)} className="px-4 py-3 text-red-500 bg-red-50 hover:bg-red-100 rounded-xl transition-colors text-[9px] font-black uppercase tracking-widest border border-red-500/10">
+                  <button onClick={() => handleDeleteUser(u.id)} className="px-4 py-3 text-red-500 bg-red-50 hover:bg-red-100 rounded-xl transition-colors text-[9px] font-black uppercase tracking-widest border border-red-500/10 cursor-pointer">
                     Purge
                   </button>
                 </div>

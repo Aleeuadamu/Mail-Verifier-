@@ -767,13 +767,13 @@ Expected JSON Schema:
     "homograph_attack_detected": boolean,
     "domain_similarity_score": number
   },
-  "summary_markdown": string // A clear markdown summary of the findings, including Key Findings, Threat Analysis, Final Verdict, and Recommended Action.
+  "summary_markdown": "string" // MANDATORY! A clear markdown summary of the findings, including Key Findings, Threat Analysis, Final Verdict, and Recommended Action.
 }
     `;
   }
 
   try {
-    const modelsToTry = ["gemini-3.5-flash", "gemini-2.5-pro", "gemini-3.1-flash-lite", "gemini-2.5-flash"];
+    const modelsToTry = ["gemini-2.5-flash", "gemini-2.5-pro"];
     let responseText = "";
     let success = false;
     let lastError: any = null;
@@ -864,7 +864,7 @@ NEW USER QUESTION: ${question}
   `;
 
   try {
-    const modelsToTry = ["gemini-3.5-flash", "gemini-2.5-pro", "gemini-3.1-flash-lite", "gemini-2.5-flash"];
+    const modelsToTry = ["gemini-2.5-flash", "gemini-2.5-pro"];
     let responseText = "";
     let success = false;
     let lastError: any = null;
