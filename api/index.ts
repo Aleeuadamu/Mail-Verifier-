@@ -16,11 +16,20 @@ const app = express();
 app.set('trust proxy', 1);
 
 if (!process.env.APP_URL) {
-  throw new Error("APP_URL must be set in environment variables");
+  console.warn("WARNING: APP_URL must be set in environment variables. Falling back to permissive CORS for development.");
 }
 
+let allowedOrigin: string | boolean = true;
+if (process.env.APP_URL) {
+  allowedOrigin = process.env.APP_URL;
+  if (typeof allowedOrigin === 'string' && allowedOrigin.endsWith('/')) {
+    allowedOrigin = allowedOrigin.slice(0, -1);
+  }
+}
+
+
 app.use(cors({
-  origin: process.env.APP_URL,
+  origin: allowedOrigin,
   credentials: true
 }));
 
@@ -31,22 +40,29 @@ const apiLimiter = rateLimit({
   max: 100, // Limit each IP to 100 requests per `window` (here, per 15 minutes)
   standardHeaders: true,
   legacyHeaders: false,
+  handler: (req, res) => {
+    res.status(429).json({ error: "Too many requests, please try again later." });
+  }
 });
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 10,
+  max: 20,
   standardHeaders: true,
   legacyHeaders: false,
+  handler: (req, res) => {
+    res.status(429).json({ error: "Too many authentication requests, please try again later." });
+  }
 });
 
 app.use("/api/", apiLimiter);
 
 import crypto from "crypto";
 
+// Use a static fallback secret so serverless instances don't invalidate each other's sessions
 app.use(cookieSession({
   name: 'session',
-  keys: [process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex')],
+  keys: [process.env.SESSION_SECRET || 'mailverifier_fallback_secret_123'],
   maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
   secure: true,
   sameSite: 'none',
@@ -188,7 +204,7 @@ app.post("/api/auth/logout", (req, res) => {
 });
 
 app.get("/api/auth/me", async (req, res) => {
-  const userId = req.session?.userId;
+  const userId = req.session?.userId || req.headers['x-firebase-uid'] as string;
   if (!userId) {
     return res.json({ user: null });
   }
@@ -203,7 +219,7 @@ app.get("/api/auth/me", async (req, res) => {
 });
 
 app.post("/api/auth/subscription", async (req, res) => {
-  const userId = req.session?.userId;
+  const userId = req.session?.userId || req.headers['x-firebase-uid'] as string;
   if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
   const { subscription } = req.body;
@@ -217,8 +233,9 @@ app.post("/api/auth/subscription", async (req, res) => {
 
 // Admin management endpoints
 app.get("/api/admin/users", async (req, res) => {
-  if (!req.session?.userId) return res.status(401).json({ error: "Unauthorized" });
-  const requestingUser = await dbService.getUserById(req.session.userId);
+  const currentUid = req.session?.userId || req.headers['x-firebase-uid'] as string;
+  if (!currentUid) return res.status(401).json({ error: "Unauthorized" });
+  const requestingUser = await dbService.getUserById(currentUid);
   if (!requestingUser?.isAdmin) return res.status(403).json({ error: "Forbidden" });
 
   const users = await dbService.getAllUsers();
@@ -233,8 +250,9 @@ app.get("/api/admin/users", async (req, res) => {
 });
 
 app.delete("/api/admin/users/:id", async (req, res) => {
-  if (!req.session?.userId) return res.status(401).json({ error: "Unauthorized" });
-  const requestingUser = await dbService.getUserById(req.session.userId);
+  const currentUid = req.session?.userId || req.headers['x-firebase-uid'] as string;
+  if (!currentUid) return res.status(401).json({ error: "Unauthorized" });
+  const requestingUser = await dbService.getUserById(currentUid);
   if (!requestingUser?.isAdmin) return res.status(403).json({ error: "Forbidden" });
 
   const { id } = req.params;
@@ -246,16 +264,20 @@ app.delete("/api/admin/users/:id", async (req, res) => {
 });
 
 app.get("/api/auth/google/url", (req, res) => {
-  const userId = req.session?.userId || req.query.uid as string;
+  const userId = req.session?.userId || req.headers['x-firebase-uid'] as string || req.query.uid as string;
   const isLoginFlow = !userId;
 
   // Construct Redirect URI
-  let appUrl = process.env.APP_URL as string;
+  let appUrl = (process.env.APP_URL || `${req.protocol}://${req.get('host')}`) as string;
   if (appUrl.endsWith("/")) {
     appUrl = appUrl.slice(0, -1);
   }
   // Use /api/auth/callback to align with GOOGLE_API_SETUP.md and solve redirect_uri_mismatch
   const redirectUri = `${appUrl}/api/auth/callback`;
+
+  if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
+    return res.status(500).json({ error: "Google OAuth credentials are not configured on the server." });
+  }
 
   const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
@@ -295,13 +317,17 @@ app.get(["/auth/callback", "/auth/callback/", "/api/auth/callback", "/api/auth/c
     return res.status(400).send("Invalid state parameter (CSRF detected).");
   }
 
-  let appUrl = process.env.APP_URL as string;
+  let appUrl = (process.env.APP_URL || `${req.protocol}://${req.get('host')}`) as string;
   if (appUrl.endsWith("/")) {
     appUrl = appUrl.slice(0, -1);
   }
   // Determine path to match the current request path (either /auth/callback or /api/auth/callback)
   const pathUsed = req.path.includes("/api/") ? "/api/auth/callback" : "/auth/callback";
   const redirectUri = `${appUrl}${pathUsed}`;
+
+  if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
+    return res.status(500).send("Google OAuth credentials are not configured on the server.");
+  }
 
   try {
     const oauth2Client = new google.auth.OAuth2(
@@ -493,7 +519,7 @@ function buildMimeMessage({
 }
 
 app.post("/api/gmail/send", async (req, res) => {
-  const uid = req.session?.userId;
+  const uid = req.session?.userId || req.headers['x-firebase-uid'] as string;
   if (!uid) return res.status(401).json({ error: "No UID provided" });
 
   const token = await getGmailTokenForUser(uid);
@@ -526,7 +552,7 @@ app.post("/api/gmail/send", async (req, res) => {
 });
 
 app.post("/api/auth/store-token", async (req, res) => {
-  const uid = req.session?.userId;
+  const uid = req.session?.userId || req.headers['x-firebase-uid'] as string;
   const { token } = req.body;
   if (!token || !uid) return res.status(400).json({ error: "Missing fields or unauthorized" });
   userGmailTokens[uid] = token;
@@ -537,7 +563,7 @@ app.post("/api/auth/store-token", async (req, res) => {
 const messagesCache: Record<string, any> = {};
 
 app.get("/api/gmail/messages", async (req, res) => {
-  const uid = req.session?.userId;
+  const uid = req.session?.userId || req.headers['x-firebase-uid'] as string;
   if (!uid) return res.status(401).json({ error: "No UID provided" });
   
   const token = await getGmailTokenForUser(uid);
@@ -614,7 +640,7 @@ app.get("/api/gmail/messages", async (req, res) => {
 });
 
 app.post("/api/analyze", async (req, res) => {
-  const uid = req.session?.userId;
+  const uid = req.session?.userId || req.headers['x-firebase-uid'] as string;
   if (!uid) return res.status(401).json({ error: "Unauthorized" });
 
   const { data, mode } = req.body;
@@ -804,7 +830,7 @@ Expected JSON Schema:
 });
 
 app.post("/api/chat-message", async (req, res) => {
-  const uid = req.session?.userId;
+  const uid = req.session?.userId || req.headers['x-firebase-uid'] as string;
   if (!uid) return res.status(401).json({ error: "Unauthorized" });
 
   const { messageContext, history, question } = req.body;

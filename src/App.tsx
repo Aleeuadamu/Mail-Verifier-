@@ -1319,40 +1319,6 @@ export default function App() {
             </h1>
           </div>
 
-          {/* Live Premium/Trial Countdown Ticker Badge in Sidebar */}
-          {getLiveCountdown() && (
-            <div className="px-6 mb-4 shrink-0">
-              <div className="p-3.5 bg-orange/5 border border-orange/15 rounded-2xl space-y-1.5 shadow-sm">
-                <div className="flex items-center gap-1.5 text-orange">
-                  {subscription.plan !== "free" ? (
-                    <Zap className="w-3.5 h-3.5 fill-current animate-pulse text-orange" />
-                  ) : (
-                    <Clock className="w-3.5 h-3.5 animate-spin text-orange" style={{ animationDuration: '4s' }} />
-                  )}
-                  <p className="text-[8px] font-black uppercase tracking-[1.5px] leading-none text-navy">
-                    {getLiveCountdown()?.label}
-                  </p>
-                </div>
-                <div className="flex justify-between items-baseline">
-                  <span className="font-mono text-xs font-black text-orange leading-none tracking-tight">
-                    {getLiveCountdown()?.formatted}
-                  </span>
-                  {subscription.plan === "free" && (
-                    <button
-                      onClick={() => {
-                        setView("subscription");
-                        openCheckoutModal("pro");
-                      }}
-                      className="text-[8px] font-black uppercase tracking-wider text-navy border-b border-navy pb-0.5 hover:text-orange hover:border-orange transition-colors cursor-pointer"
-                    >
-                      UPGRADE
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-
           <div className="flex-1 overflow-y-auto px-6 pb-6">
             <nav className="flex flex-col gap-4">
               {/* Mailboxes Group */}
@@ -1562,38 +1528,6 @@ export default function App() {
                       className="absolute top-16 left-0 right-0 z-50 bg-white border-b border-navy/15 shadow-2xl md:hidden overflow-hidden flex flex-col"
                     >
                       <div className="p-4 space-y-4">
-                        {getLiveCountdown() && (
-                          <div className="p-3 bg-orange/5 border border-orange/15 rounded-2xl flex justify-between items-center shrink-0">
-                            <div className="flex items-center gap-2.5">
-                              {subscription.plan !== "free" ? (
-                                <Zap className="w-4 h-4 fill-current text-orange animate-pulse" />
-                              ) : (
-                                <Clock className="w-4 h-4 text-orange animate-spin" style={{ animationDuration: '4s' }} />
-                              )}
-                              <div>
-                                <p className="text-[7px] font-black uppercase tracking-wider text-navy/40 leading-none">
-                                  {getLiveCountdown()?.label}
-                                </p>
-                                <p className="font-mono text-[10px] font-black text-orange mt-1 leading-none">
-                                  {getLiveCountdown()?.formatted}
-                                </p>
-                              </div>
-                            </div>
-                            {subscription.plan === "free" && (
-                              <button
-                                onClick={() => {
-                                  setView("subscription");
-                                  setMobileMenuOpen(false);
-                                  openCheckoutModal("pro");
-                                }}
-                                className="bg-navy text-orange text-[8px] font-black uppercase tracking-widest px-3 py-1.5 rounded-lg active:scale-95 transition-all cursor-pointer"
-                              >
-                                UPGRADE
-                              </button>
-                            )}
-                          </div>
-                        )}
-
                         <div className="space-y-1">
                           <span className="text-[9px] font-black uppercase tracking-widest text-navy/40 pl-3">
                             Mail Folders
@@ -2378,41 +2312,6 @@ export default function App() {
                     Spam
                   </button>
                 </div>
-
-                {inboxError &&
-                  !(
-                    inboxError.toLowerCase().includes("no gmail token") ||
-                    inboxError.toLowerCase().includes("reconnect")
-                  ) && (
-                    <div
-                      className="bg-red-500/5 border border-red-500/10 rounded-3xl p-5 space-y-4 text-center mx-2"
-                      id="inbox-error-diagnostic-panel"
-                    >
-                      <div className="w-12 h-12 bg-red-500/15 rounded-full flex items-center justify-center mx-auto">
-                        <AlertTriangle className="w-6 h-6 text-red-500 animate-pulse" />
-                      </div>
-                      <div className="space-y-1.5">
-                        <h4 className="text-[11px] font-black uppercase tracking-widest text-red-500">
-                          Secure Stream Interrupt
-                        </h4>
-                        <p className="text-xs text-navy/80 leading-relaxed font-semibold">
-                          {inboxError.toLowerCase().includes("failed to fetch")
-                            ? "Connection to the secure server failed. The server might be reloading after system changes, or popups/cookies are blocked."
-                            : inboxError}
-                        </p>
-                      </div>
-                      <div className="flex gap-2.5 justify-center">
-                        <button
-                          type="button"
-                          onClick={() => fetchInbox(undefined, searchQuery)}
-                          className="px-4 py-2 bg-navy text-white hover:bg-navy/90 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all cursor-pointer inline-flex items-center gap-1.5 shadow-md shadow-navy/15"
-                        >
-                          <RefreshCw className="w-3 h-3 text-orange" />
-                          Retry Connection
-                        </button>
-                      </div>
-                    </div>
-                  )}
 
                 {isLoadingInbox ? (
                   <div className="py-20 flex flex-col items-center gap-4 text-center">
