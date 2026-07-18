@@ -15,8 +15,12 @@ const app = express();
 
 app.set('trust proxy', 1);
 
+if (!process.env.APP_URL) {
+  throw new Error("APP_URL must be set in environment variables");
+}
+
 app.use(cors({
-  origin: process.env.APP_URL || true,
+  origin: process.env.APP_URL,
   credentials: true
 }));
 
@@ -25,6 +29,13 @@ app.use(express.json());
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 100, // Limit each IP to 100 requests per `window` (here, per 15 minutes)
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -57,8 +68,52 @@ function getAiClient() {
   return ai;
 }
 
-const SYSTEM_INSTRUCTION = `
-You are Mail Verifier AI, a real-time email security assistant embedded inside a mobile and web application.
+const oauth2ClientShared = new google.auth.OAuth2(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET,
+  // Not passing redirectUri here since it's only needed for generating auth URL and exchanging code
+);
+
+const userGmailTokens: Record<string, any> = {};
+
+async function getGmailTokenForUser(uid: string): Promise<string | null> {
+  let tokenData = userGmailTokens[uid];
+  if (!tokenData) {
+    tokenData = await dbService.getGmailToken(uid);
+    if (tokenData) {
+      userGmailTokens[uid] = tokenData;
+    }
+  }
+
+  if (!tokenData) return null;
+
+  if (tokenData.expiry_date && Date.now() >= tokenData.expiry_date - 60000) {
+    if (tokenData.refresh_token) {
+      try {
+        oauth2ClientShared.setCredentials({
+          refresh_token: tokenData.refresh_token
+        });
+        const { credentials } = await oauth2ClientShared.refreshAccessToken();
+        tokenData = {
+          ...tokenData,
+          access_token: credentials.access_token!,
+          expiry_date: credentials.expiry_date || null
+        };
+        userGmailTokens[uid] = tokenData;
+        await dbService.saveGmailToken(uid, tokenData);
+      } catch (e: any) {
+        console.error("Failed to refresh Gmail access token:", e.message);
+        return null; // Return null if refresh fails
+      }
+    } else {
+      // Token expired and no refresh token
+      return null;
+    }
+  }
+
+  return tokenData.access_token;
+}
+const SYSTEM_INSTRUCTION = `You are Mail Verifier AI, a real-time email security assistant embedded inside a mobile and web application.
 You operate as part of a full system that continuously scans user emails after secure OAuth permission.
 Your responsibilities include: Classifying emails, Detecting phishing patterns, Performing risk scoring, and Explaining reasoning clearly.
 You do not access emails yourself. You only analyze structured email data sent to you.
@@ -71,25 +126,12 @@ GLOBAL RULES - MUST BE STRICTLY ADHERED TO:
 5. USER-SAFETY DRIVEN: Focus on objective security risk assessment.
 `;
 
-const userGmailTokens: Record<string, string> = {};
-
-async function getGmailTokenForUser(uid: string): Promise<string | null> {
-  let token = userGmailTokens[uid];
-  if (!token) {
-    token = await dbService.getGmailToken(uid);
-    if (token) {
-      userGmailTokens[uid] = token;
-    }
-  }
-  return token;
-}
-
 // Custom Local Auth routes
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", env: process.env.VERCEL ? "vercel" : "local" });
 });
 
-app.post("/api/auth/register", async (req, res) => {
+app.post("/api/auth/register", authLimiter, async (req, res) => {
   const { email, password, name } = req.body;
   if (!email || !password || !name) {
     return res.status(400).json({ error: "Email, password, and name are required" });
@@ -114,7 +156,7 @@ app.post("/api/auth/register", async (req, res) => {
   }
 });
 
-app.post("/api/auth/login", async (req, res) => {
+app.post("/api/auth/login", authLimiter, async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) {
     return res.status(400).json({ error: "Email and password are required" });
@@ -157,7 +199,7 @@ app.get("/api/auth/me", async (req, res) => {
     return res.json({ user: null });
   }
 
-  res.json({ user: { id: user.id, email: user.email, name: user.name, subscription: user.subscription } });
+  res.json({ user: { id: user.id, email: user.email, name: user.name, subscription: user.subscription, isAdmin: user.isAdmin } });
 });
 
 app.post("/api/auth/subscription", async (req, res) => {
@@ -176,6 +218,9 @@ app.post("/api/auth/subscription", async (req, res) => {
 // Admin management endpoints
 app.get("/api/admin/users", async (req, res) => {
   if (!req.session?.userId) return res.status(401).json({ error: "Unauthorized" });
+  const requestingUser = await dbService.getUserById(req.session.userId);
+  if (!requestingUser?.isAdmin) return res.status(403).json({ error: "Forbidden" });
+
   const users = await dbService.getAllUsers();
   const safeUsers = users.map(u => ({
     id: u.id,
@@ -189,6 +234,9 @@ app.get("/api/admin/users", async (req, res) => {
 
 app.delete("/api/admin/users/:id", async (req, res) => {
   if (!req.session?.userId) return res.status(401).json({ error: "Unauthorized" });
+  const requestingUser = await dbService.getUserById(req.session.userId);
+  if (!requestingUser?.isAdmin) return res.status(403).json({ error: "Forbidden" });
+
   const { id } = req.params;
   const deleted = await dbService.deleteUser(id);
   if (!deleted) {
@@ -202,7 +250,7 @@ app.get("/api/auth/google/url", (req, res) => {
   const isLoginFlow = !userId;
 
   // Construct Redirect URI
-  let appUrl = process.env.APP_URL || `${req.protocol}://${req.get('host')}`;
+  let appUrl = process.env.APP_URL as string;
   if (appUrl.endsWith("/")) {
     appUrl = appUrl.slice(0, -1);
   }
@@ -222,11 +270,16 @@ app.get("/api/auth/google/url", (req, res) => {
     "https://www.googleapis.com/auth/userinfo.profile"
   ];
 
+  const stateNonce = crypto.randomBytes(16).toString('hex');
+  req.session!.oauthState = stateNonce;
+  req.session!.oauthTargetUserId = userId;
+  req.session!.oauthIsLoginFlow = isLoginFlow;
+
   const authUrl = oauth2Client.generateAuthUrl({
     access_type: "offline",
     scope,
     prompt: "consent",
-    state: isLoginFlow ? "google_login" : userId // pass "google_login" if doing login/signup flow
+    state: stateNonce
   });
 
   res.json({ url: authUrl });
@@ -238,7 +291,11 @@ app.get(["/auth/callback", "/auth/callback/", "/api/auth/callback", "/api/auth/c
     return res.status(400).send("No authentication code received.");
   }
 
-  let appUrl = process.env.APP_URL || `${req.protocol}://${req.get('host')}`;
+  if (!state || state !== req.session?.oauthState) {
+    return res.status(400).send("Invalid state parameter (CSRF detected).");
+  }
+
+  let appUrl = process.env.APP_URL as string;
   if (appUrl.endsWith("/")) {
     appUrl = appUrl.slice(0, -1);
   }
@@ -254,15 +311,13 @@ app.get(["/auth/callback", "/auth/callback/", "/api/auth/callback", "/api/auth/c
     );
 
     const { tokens } = await oauth2Client.getToken(code as string);
-    const token = tokens.access_token;
     oauth2Client.setCredentials(tokens);
 
     let finalUserId: string | null = null;
     let safeUser: any = null;
 
-    // Check if we are doing a google_login flow or have an existing userId
-    const isLoginFlow = state === "google_login";
-    let targetUserId = isLoginFlow ? null : ((state as string) || req.session?.userId);
+    const isLoginFlow = req.session?.oauthIsLoginFlow;
+    let targetUserId = req.session?.oauthTargetUserId;
 
     // Fetch user info from Google
     let email = "";
@@ -318,11 +373,16 @@ app.get(["/auth/callback", "/auth/callback/", "/api/auth/callback", "/api/auth/c
     // Set the cookie session to log them in securely
     req.session!.userId = finalUserId;
 
-    if (token) {
-      await dbService.saveGmailToken(finalUserId, token);
+    if (tokens && tokens.access_token) {
+      const tokenData = {
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        expiry_date: tokens.expiry_date
+      };
+      await dbService.saveGmailToken(finalUserId, tokenData);
       
       // Also store in userGmailTokens in memory to avoid reading from disk on every route call
-      userGmailTokens[finalUserId] = token;
+      userGmailTokens[finalUserId] = tokenData;
     }
 
     res.send(`
@@ -348,10 +408,10 @@ app.get(["/auth/callback", "/auth/callback/", "/api/auth/callback", "/api/auth/c
                 if (window.opener) {
                   window.opener.postMessage({ 
                     type: 'OAUTH_AUTH_SUCCESS', 
-                    token: '${token || ""}', 
+                    token: '${tokens?.access_token || ""}', 
                     uid: '${finalUserId}',
                     user: ${safeUser ? JSON.stringify(safeUser) : 'null'}
-                  }, '*');
+                  }, '${appUrl}');
                   window.close();
                 } else {
                   window.location.href = '/';
@@ -474,6 +534,8 @@ app.post("/api/auth/store-token", async (req, res) => {
   res.json({ success: true });
 });
 
+const messagesCache: Record<string, any> = {};
+
 app.get("/api/gmail/messages", async (req, res) => {
   const uid = req.session?.userId;
   if (!uid) return res.status(401).json({ error: "No UID provided" });
@@ -487,7 +549,7 @@ app.get("/api/gmail/messages", async (req, res) => {
   const gmail = google.gmail({ version: "v1", auth: client });
   
   try {
-    const maxResults = parseInt(req.query.maxResults as string) || 10;
+    const maxResults = Math.min(parseInt(req.query.maxResults as string) || 10, 25);
     const q = req.query.q as string || undefined;
     const pageToken = req.query.pageToken as string || undefined;
 
@@ -500,6 +562,11 @@ app.get("/api/gmail/messages", async (req, res) => {
     
     const messages = await Promise.all(
       (response.data.messages || []).map(async (msg) => {
+        const cacheKey = `${uid}_${msg.id}`;
+        if (messagesCache[cacheKey]) {
+          return messagesCache[cacheKey];
+        }
+
         const detail = await gmail.users.messages.get({
           userId: "me",
           id: msg.id!,
@@ -513,7 +580,7 @@ app.get("/api/gmail/messages", async (req, res) => {
         
         let snippet = detail.data.snippet || "";
         
-        return {
+        const parsedMsg = {
           id: msg.id,
           subject,
           from,
@@ -521,6 +588,8 @@ app.get("/api/gmail/messages", async (req, res) => {
           snippet,
           fullData: detail.data
         };
+        messagesCache[cacheKey] = parsedMsg;
+        return parsedMsg;
       })
     );
     

@@ -78,6 +78,7 @@ export interface User {
   name: string;
   subscription: Subscription;
   createdAt: string;
+  isAdmin?: boolean;
 }
 
 const DB_FILE = path.join(process.cwd(), "db.json");
@@ -99,6 +100,14 @@ function writeLocalDb(data: any) {
   } catch (err) {
     console.error("Failed to write local DB:", err);
   }
+}
+
+function handleDbFallback(operation: string, error: Error) {
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_LOCAL_DB_FALLBACK !== 'true') {
+    console.error(`[FATAL] Firestore error in ${operation}:`, error.message);
+    throw new Error(`Service Unavailable: ${operation} failed`);
+  }
+  console.error(`Firestore error in ${operation}, falling back to local DB:`, error.message);
 }
 
 const localDb = {
@@ -134,7 +143,8 @@ const localDb = {
         trialStartDate: new Date().toISOString(),
         invoices: []
       },
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      isAdmin: false
     };
     data.users[id] = newUser;
     writeLocalDb(data);
@@ -152,14 +162,18 @@ const localDb = {
     return data.users[id];
   },
 
-  saveGmailToken(id: string, token: string) {
+  saveGmailToken(id: string, tokenData: { access_token: string, refresh_token?: string | null, expiry_date?: number | null }) {
     const data = readLocalDb();
     if (!data.tokens) data.tokens = {};
-    data.tokens[id] = token;
+    const existing = data.tokens[id] || {};
+    data.tokens[id] = {
+      ...existing,
+      ...tokenData,
+    };
     writeLocalDb(data);
   },
 
-  getGmailToken(id: string): string | null {
+  getGmailToken(id: string): any | null {
     const data = readLocalDb();
     if (!data.tokens) return null;
     return data.tokens[id] || null;
@@ -193,7 +207,7 @@ export const dbService = {
       if (snapshot.empty) return null;
       return snapshot.docs[0].data() as User;
     } catch (e: any) {
-      console.warn("Firestore error in getUserByEmail, falling back to local DB:", e.message);
+      handleDbFallback("getUserByEmail", e);
       return localDb.getUserByEmail(normalizedEmail);
     }
   },
@@ -207,7 +221,7 @@ export const dbService = {
       if (!doc.exists) return null;
       return doc.data() as User;
     } catch (e: any) {
-      console.warn("Firestore error in getUserById, falling back to local DB:", e.message);
+      handleDbFallback("getUserById", e);
       return localDb.getUserById(id);
     }
   },
@@ -230,13 +244,14 @@ export const dbService = {
         trialStartDate: new Date().toISOString(),
         invoices: []
       },
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      isAdmin: false
     };
     try {
       await db.collection("users").doc(id).set(newUser);
       return newUser;
     } catch (e: any) {
-      console.warn("Firestore error in createUser, falling back to local DB:", e.message);
+      handleDbFallback("createUser", e);
       return localDb.createUser(email, passwordHash, name);
     }
   },
@@ -258,34 +273,34 @@ export const dbService = {
       await userRef.set(user);
       return user;
     } catch (e: any) {
-      console.warn("Firestore error in updateUserSubscription, falling back to local DB:", e.message);
+      handleDbFallback("updateUserSubscription", e);
       return localDb.updateUserSubscription(id, subscription);
     }
   },
 
-  async saveGmailToken(id: string, token: string): Promise<void> {
+  async saveGmailToken(id: string, tokenData: { access_token: string, refresh_token?: string | null, expiry_date?: number | null }): Promise<void> {
     if (!db) {
-      localDb.saveGmailToken(id, token);
+      localDb.saveGmailToken(id, tokenData);
       return;
     }
     try {
-      await db.collection("tokens").doc(id).set({ token });
+      await db.collection("tokens").doc(id).set(tokenData, { merge: true });
     } catch (e: any) {
-      console.warn("Firestore error in saveGmailToken, falling back to local DB:", e.message);
-      localDb.saveGmailToken(id, token);
+      handleDbFallback("saveGmailToken", e);
+      localDb.saveGmailToken(id, tokenData);
     }
   },
 
-  async getGmailToken(id: string): Promise<string | null> {
+  async getGmailToken(id: string): Promise<any | null> {
     if (!db) {
       return localDb.getGmailToken(id);
     }
     try {
       const doc = await db.collection("tokens").doc(id).get();
       if (!doc.exists) return null;
-      return doc.data()?.token || null;
+      return doc.data() || null;
     } catch (e: any) {
-      console.warn("Firestore error in getGmailToken, falling back to local DB:", e.message);
+      handleDbFallback("getGmailToken", e);
       return localDb.getGmailToken(id);
     }
   },
@@ -298,7 +313,7 @@ export const dbService = {
       const snapshot = await db.collection("users").get();
       return snapshot.docs.map(doc => doc.data() as User);
     } catch (e: any) {
-      console.warn("Firestore error in getAllUsers, falling back to local DB:", e.message);
+      handleDbFallback("getAllUsers", e);
       return localDb.getAllUsers();
     }
   },
@@ -314,7 +329,7 @@ export const dbService = {
       await db.collection("tokens").doc(id).delete().catch(() => {});
       return true;
     } catch (e: any) {
-      console.warn("Firestore error in deleteUser, falling back to local DB:", e.message);
+      handleDbFallback("deleteUser", e);
       return localDb.deleteUser(id);
     }
   }

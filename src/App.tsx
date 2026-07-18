@@ -85,7 +85,7 @@ const AppLogo = ({ className = "w-10 h-10" }: { className?: string }) => (
 );
 
 export default function App() {
-  const [user, setUser] = useState<{ email: string; name: string; id: string } | null>(
+  const [user, setUser] = useState<{ email: string; name: string; id: string; isAdmin?: boolean } | null>(
     null,
   );
   const [inbox, setInbox] = useState<GmailMessage[]>([]);
@@ -374,7 +374,8 @@ export default function App() {
             setUser({
               email: data.user.email,
               name: data.user.name,
-              id: data.user.id
+              id: data.user.id,
+              isAdmin: data.user.isAdmin
             });
             setView("inbox");
             setSubscription(data.user.subscription || {
@@ -442,6 +443,7 @@ export default function App() {
             email: loggedInUser.email,
             name: loggedInUser.name,
             id: loggedInUser.id,
+            isAdmin: loggedInUser.isAdmin
           });
           setSubscription(loggedInUser.subscription || {
             plan: "free",
@@ -760,6 +762,7 @@ export default function App() {
         email: loggedInUser.email,
         name: loggedInUser.name,
         id: loggedInUser.id,
+        isAdmin: loggedInUser.isAdmin
       });
       setView("inbox");
       setSubscription(loggedInUser.subscription || {
@@ -804,6 +807,7 @@ export default function App() {
         email: registeredUser.email,
         name: registeredUser.name,
         id: registeredUser.id,
+        isAdmin: registeredUser.isAdmin
       });
       setView("inbox");
       setSubscription(registeredUser.subscription || {
@@ -1479,7 +1483,7 @@ export default function App() {
                   </span>
                 </button>
 
-                {user?.email === "adamu0533@gmail.com" && (
+                {user?.isAdmin && (
                   <button
                     onClick={() => setView("admin")}
                     className={cn(
@@ -1726,7 +1730,7 @@ export default function App() {
                               <span>Account Settings</span>
                             </button>
 
-                            {user?.email === "adamu0533@gmail.com" && (
+                            {user?.isAdmin && (
                               <button
                                 onClick={() => {
                                   setView("admin");
@@ -4184,7 +4188,7 @@ export default function App() {
               </motion.div>
             )}
 
-            {view === "admin" && user?.email === "adamu0533@gmail.com" && (
+            {view === "admin" && user?.isAdmin && (
               <AdminDashboard />
             )}
           </AnimatePresence>

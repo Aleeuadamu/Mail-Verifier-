@@ -5,10 +5,22 @@ import { Shield, ArrowRight } from "lucide-react";
 export default function AdminDashboard() {
   const [adminUsers, setAdminUsers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isAuthorized, setIsAuthorized] = useState(false);
 
   useEffect(() => {
     const fetchUsers = async () => {
       try {
+        const meRes = await fetch("/api/auth/me");
+        if (meRes.ok) {
+          const meData = await meRes.json();
+          if (meData?.user?.isAdmin) {
+            setIsAuthorized(true);
+          } else {
+            setLoading(false);
+            return;
+          }
+        }
+
         const response = await fetch("/api/admin/users");
         if (response.ok) {
           const usersList = await response.json();
@@ -24,6 +36,23 @@ export default function AdminDashboard() {
     };
     fetchUsers();
   }, []);
+
+  if (loading) {
+    return (
+      <div className="p-8 flex justify-center text-navy/50">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-orange"></div>
+      </div>
+    );
+  }
+
+  if (!isAuthorized) {
+    return (
+      <div className="p-8 text-center bg-white rounded-3xl border border-navy/10 mt-8">
+        <h2 className="text-xl font-black text-navy uppercase tracking-widest mb-4">Access Denied</h2>
+        <p className="text-navy/60 font-medium">You do not have administrative privileges.</p>
+      </div>
+    );
+  }
 
   const handleDeleteUser = async (id: string) => {
     if (confirm("Delete this user?")) {
