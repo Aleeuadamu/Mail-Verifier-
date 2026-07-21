@@ -11,13 +11,17 @@ export interface EmailData {
 
 export type AnalysisMode = "INBOX_SCAN" | "SINGLE_EMAIL_VIEW" | "REALTIME_ALERT";
 
-export async function analyzeEmail(data: EmailData | EmailData[], mode: AnalysisMode = "SINGLE_EMAIL_VIEW") {
+export async function analyzeEmail(data: EmailData | EmailData[], mode: AnalysisMode = "SINGLE_EMAIL_VIEW", uid?: string) {
   try {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (uid) {
+      headers["x-firebase-uid"] = uid;
+    }
     const res = await fetch("/api/analyze", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
+      headers,
       body: JSON.stringify({ data, mode }),
     });
 

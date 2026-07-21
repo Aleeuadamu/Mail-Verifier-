@@ -103,6 +103,30 @@ export default function App() {
     headers: "",
   });
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [loadingStep, setLoadingStep] = useState(0);
+
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (isAnalyzing) {
+      setLoadingStep(0);
+      interval = setInterval(() => {
+        setLoadingStep(prev => (prev + 1) % 9);
+      }, 300);
+    }
+    return () => clearInterval(interval);
+  }, [isAnalyzing]);
+  
+  const loadingTexts = [
+    "Interrogating message headers...",
+    "Scanning for spoofing patterns...",
+    "Validating sender domains...",
+    "Checking IP reputations...",
+    "Analyzing semantic intent...",
+    "Inspecting attachments...",
+    "Evaluating risk factors...",
+    "Cross-referencing threat databases...",
+    "Finalizing AI audit..."
+  ];
   const [result, setResult] = useState<any | null>(null);
   const [view, setView] = useState<
     | "login"
@@ -338,6 +362,7 @@ export default function App() {
 
   // Email Compose states
   const [composeTo, setComposeTo] = useState("");
+  const [composeReplyToMessageId, setComposeReplyToMessageId] = useState<string | null>(null);
   const [composeSubject, setComposeSubject] = useState("");
   const [composeBody, setComposeBody] = useState("");
   const [composeQuote, setComposeQuote] = useState("");
@@ -358,6 +383,7 @@ export default function App() {
     phone: "",
     password: "",
     consent: false,
+    rememberMe: false,
   });
   const [authError, setAuthError] = useState<string | null>(null);
   const [isGmailConnected, setIsGmailConnected] = useState<boolean>(false);
@@ -615,7 +641,7 @@ export default function App() {
         setInboxNextPageToken(data.nextPageToken);
 
         // Trigger background scan for top 5 emails for the feed
-        triggerInboxScan(data.messages.slice(0, 5));
+        triggerInboxScan(data.messages.slice(0, 5), currentUid);
 
         // Start background syncing of the rest of the mailbox
         if (data.nextPageToken) {
@@ -666,7 +692,7 @@ export default function App() {
     fetchInbox(undefined, undefined, 40, folder);
   };
 
-  const triggerInboxScan = async (messages: GmailMessage[]) => {
+  const triggerInboxScan = async (messages: GmailMessage[], uid?: string) => {
     if (!isPremiumActive()) {
       console.log("Subscription inactive (Trial expired): background inbox scan skipped");
       return;
@@ -681,7 +707,7 @@ export default function App() {
         senderEmail: msg.from.match(/<(.+)>/)?.[1] || msg.from,
       }));
 
-      const scanResults = await analyzeEmail(emailDataList, "INBOX_SCAN");
+      const scanResults = await analyzeEmail(emailDataList, "INBOX_SCAN", uid || user?.id);
       if (Array.isArray(scanResults)) {
         setInbox((prev) =>
           prev.map((msg) => {
@@ -749,6 +775,7 @@ export default function App() {
         body: JSON.stringify({
           email: authFormData.email,
           password: authFormData.password,
+          rememberMe: authFormData.rememberMe,
         }),
       });
 
@@ -843,7 +870,7 @@ export default function App() {
 
     setIsAnalyzing(true);
     try {
-      const output = await analyzeEmail(dataToAnalyze, "SINGLE_EMAIL_VIEW");
+      const output = await analyzeEmail(dataToAnalyze, "SINGLE_EMAIL_VIEW", user?.id);
       setResult(output);
 
       // Update the inbox feed with the new detailed analysis so it matches the analysis tab
@@ -903,91 +930,14 @@ export default function App() {
   const handleCheckoutSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!checkoutPlan) return;
-    if (!checkoutCardName || !checkoutCardNo || !checkoutCardExpiry || !checkoutCardCVC) {
-      alert("Please enter all required security details for your payment card.");
-      return;
-    }
 
     setIsProcessingCheckout(true);
     setPaymentTrackerStep(0);
     
-    try {
-      // Step 0 -> Step 1 after 1200ms
-      await new Promise((resolve) => setTimeout(resolve, 1200));
-      setPaymentTrackerStep(1);
-
-      // Step 1 -> Step 2 after 1200ms
-      await new Promise((resolve) => setTimeout(resolve, 1200));
-      setPaymentTrackerStep(2);
-
-      // Step 2 -> Step 3 after 1200ms
-      await new Promise((resolve) => setTimeout(resolve, 1200));
-      setPaymentTrackerStep(3);
-
-      // Step 3 -> Upgrade database & state, then trigger success countdown (Step 4) after 1200ms
-      await new Promise((resolve) => setTimeout(resolve, 1200));
-
-      const price = isAnnual ? "$4.00/mo ($48.00/yr)" : "$5.00/mo";
-      const invoiceId = "INV_" + Math.random().toString(36).substr(2, 9).toUpperCase();
-      const invoiceDate = new Date().toLocaleDateString("en-US", {
-        year: "numeric",
-        month: "short",
-        day: "numeric",
-      });
-
-      const nextPeriod = new Date();
-      if (isAnnual) {
-        nextPeriod.setFullYear(nextPeriod.getFullYear() + 1);
-      } else {
-        nextPeriod.setDate(nextPeriod.getDate() + 30);
-      }
-      const renewDate = nextPeriod.toLocaleDateString("en-US", {
-        year: "numeric",
-        month: "short",
-        day: "numeric",
-      });
-
-      const newInvoice = {
-        id: invoiceId,
-        date: invoiceDate,
-        amount: price,
-        status: "paid" as const,
-      };
-
-      const prevInvoices = subscription.invoices || [];
-      const updatedSub = {
-        plan: checkoutPlan,
-        usage: subscription.usage, // Preserve current scan metrics
-        paymentMethod: `Visa ending in ${checkoutCardNo.trim().slice(-4)}`,
-        currentPeriodEnd: renewDate,
-        trialStartDate: subscription.trialStartDate,
-        invoices: [newInvoice, ...prevInvoices],
-      };
-
-      setSubscription(updatedSub);
-
-      if (user?.id) {
-        try {
-          await fetch("/api/auth/subscription", {
-            method: "POST",
-            headers: { 
-              "Content-Type": "application/json",
-              "x-firebase-uid": user.id
-            },
-            body: JSON.stringify({ subscription: updatedSub }),
-          });
-        } catch (e) {
-          console.warn("Failed to sync subscription details to server:", e);
-        }
-      }
-
-      setPaymentTrackerStep(4);
-    } catch (checkoutErr) {
-      console.error("Failed to process payment checkout", checkoutErr);
-      alert("Transaction verification failed. Please try again.");
-      setIsProcessingCheckout(false);
-      setPaymentTrackerStep(-1);
-    }
+    // Simulate short UI loading then redirect
+    setTimeout(() => {
+        window.location.href = "https://hyparrow.com/";
+    }, 1500);
   };
 
   const handleDowngradeToFree = async () => {
@@ -1127,6 +1077,21 @@ export default function App() {
   };
 
   const selectEmail = (msg: GmailMessage) => {
+    // Mark as read in Gmail in the background
+    const currentUid = user?.id;
+    if (currentUid && msg.id) {
+      fetch("/api/gmail/mark-read", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-firebase-uid": currentUid
+        },
+        body: JSON.stringify({ messageId: msg.id })
+      }).catch(err => console.log("Failed to mark as read"));
+      
+      // Optioanlly update local state to reflect it's read immediately
+      setInbox(prev => prev.map(m => m.id === msg.id ? { ...m, labelIds: (m.labelIds || []).filter(l => l !== 'UNREAD') } : m));
+    }
     const headers = msg.fullData?.payload?.headers || [];
 
     // Attempt simpler body extraction
@@ -1240,6 +1205,7 @@ export default function App() {
           subject: composeSubject,
           body: composeQuote ? composeBody + "\n\n" + composeQuote : composeBody,
           attachments: composeAttachments,
+          replyToMessageId: composeReplyToMessageId
         }),
       });
 
@@ -1795,7 +1761,7 @@ export default function App() {
 
                           <div className="space-y-1">
                             <label className="text-[10px] font-black uppercase tracking-widest text-navy/40 ml-2">
-                              Secret Password
+                              Password
                             </label>
                             <div className="relative">
                               <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-navy/30" />
@@ -1824,7 +1790,21 @@ export default function App() {
                                 )}
                               </button>
                             </div>
-                            <div className="flex justify-end pr-2">
+                            <div className="flex justify-between items-center px-2">
+                              <label className="flex items-center gap-2 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={authFormData.rememberMe}
+                                  onChange={(e) =>
+                                    setAuthFormData({
+                                      ...authFormData,
+                                      rememberMe: e.target.checked,
+                                    })
+                                  }
+                                  className="w-3.5 h-3.5 accent-orange focus:ring-orange/20"
+                                />
+                                <span className="text-[10px] font-bold tracking-widest uppercase text-navy/60">Keep me logged in</span>
+                              </label>
                               <button
                                 type="button"
                                 onClick={() => setLoginMode("forgot")}
@@ -2738,10 +2718,10 @@ export default function App() {
                     </div>
                     <div className="text-center space-y-2">
                       <p className="text-sm font-black uppercase tracking-[5px] text-orange">
-                        Neural Audit in Progress
+                        Ai Analysing
                       </p>
                       <p className="text-[10px] font-medium text-navy/30 italic">
-                        Interrogating message headers...
+                        {loadingTexts[loadingStep]}
                       </p>
                     </div>
                   </div>
@@ -2814,6 +2794,7 @@ export default function App() {
                                       setComposeSubject(
                                         `Re: ${formData.subject}`,
                                       );
+                                      setComposeReplyToMessageId(formData.id || null);
                                       setComposeBody("");
                                       setComposeQuote(
                                         `> On ${new Date().toLocaleDateString()}, ${formData.senderName} wrote:\n> ${formData.body.split("\n").join("\n> ")}`
@@ -2832,6 +2813,7 @@ export default function App() {
                                       setComposeSubject(
                                         `Fwd: ${formData.subject}`,
                                       );
+                                      setComposeReplyToMessageId(null);
                                       setComposeBody("");
                                       setComposeQuote(
                                         `---------- Forwarded message ---------\nFrom: ${formData.senderName} <${formData.senderEmail}>\nSubject: ${formData.subject}\n\n${formData.body}`
@@ -2976,36 +2958,38 @@ export default function App() {
                           </div>
                         </div>
 
-                        {/* Analysis Content */}
-                        <div className="space-y-6">
-                            {/* Summary Markdown */}
-                            {result?.summary_markdown && (
-                                <div className="bg-navy/[0.03] p-8 rounded-[3rem] border border-navy/10 markdown-container text-navy/80">
-                                <ReactMarkdown
-                                  remarkPlugins={[remarkGfm]}
-                                  components={{
-                                    h3: ({ ...props }) => (
-                                      <h3 className="text-xl font-display font-black uppercase tracking-tighter text-orange mb-6 mt-10 first:mt-0 italic" {...props} />
-                                    ),
-                                    h4: ({ ...props }) => (
-                                      <h4 className="text-sm font-black uppercase tracking-widest text-navy/60 mb-4 mt-8 flex items-center gap-2 before:w-4 before:h-[2px] before:bg-orange" {...props} />
-                                    ),
-                                    p: ({ ...props }) => <p className="text-sm leading-relaxed mb-6 font-medium text-navy/80" {...props} />,
-                                    ul: ({ ...props }) => <ul className="space-y-3 mb-6" {...props} />,
-                                    li: ({ ...props }) => (
-                                      <li className="text-xs flex gap-3 text-navy/70">
-                                        <span className="w-1.5 h-1.5 bg-orange rounded-full mt-1.5 flex-shrink-0" />
-                                        <span {...props} />
-                                      </li>
-                                    ),
-                                  }}
-                                >
-                                  {result.summary_markdown}
-                                </ReactMarkdown>
-                                </div>
-                            )}
+                        {/* Analysis Content Markdown directly below score */}
+                        {result?.summary_markdown && (
+                          <div className="bg-transparent markdown-container text-navy/80 w-full">
+                            <ReactMarkdown
+                              remarkPlugins={[remarkGfm]}
+                              components={{
+                                h3: ({ ...props }) => (
+                                  <h3 className="text-xl font-display font-black uppercase tracking-tighter text-orange mb-4 mt-8 first:mt-0 italic flex items-center gap-2" {...props}>
+                                    {props.children}
+                                  </h3>
+                                ),
+                                h4: ({ ...props }) => (
+                                  <h4 className="text-sm font-black uppercase tracking-widest text-navy/60 mb-3 mt-6 flex items-center gap-2 before:w-4 before:h-[2px] before:bg-orange" {...props} />
+                                ),
+                                p: ({ ...props }) => <p className="text-sm leading-relaxed mb-4 font-medium text-navy/80" {...props} />,
+                                ul: ({ ...props }) => <ul className="space-y-3 mb-6 list-none p-0" {...props} />,
+                                li: ({ ...props }) => (
+                                  <li className="text-xs flex gap-3 text-navy/70 leading-relaxed font-medium">
+                                    <span className="w-1.5 h-1.5 bg-orange rounded-full mt-1.5 flex-shrink-0" />
+                                    <span>{props.children}</span>
+                                  </li>
+                                ),
+                                strong: ({ ...props }) => <strong className="font-black text-navy" {...props} />
+                              }}
+                            >
+                              {result.summary_markdown}
+                            </ReactMarkdown>
+                          </div>
+                        )}
 
-                            {/* Complex Data Grid */}
+                        {/* Complex Data Grid */}
+                        <div className="space-y-6">
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                <div className="bg-white border border-navy/10 p-6 rounded-3xl space-y-4">
                                   <div className="flex items-center gap-3 pb-3 border-b border-navy/5">
@@ -3479,7 +3463,7 @@ export default function App() {
                           <div className="space-y-6 py-4">
                             <div className="text-center space-y-2">
                               <span className="bg-orange/10 text-orange px-3 py-1.5 rounded-full text-[9px] font-black uppercase tracking-[3px] border border-orange/20">
-                                Realtime Payment Router
+                                Hyparrow Gateway
                               </span>
                               <h3 className="text-2xl font-display font-black uppercase italic tracking-tight text-navy">
                                 {paymentTrackerStep === 4 ? "PAYMENT SUCCESSFUL" : "PROCESSING SECURE FUNDS"}
@@ -3517,9 +3501,9 @@ export default function App() {
                             {/* Status Steps tracking */}
                             <div className="space-y-3 bg-navy/[0.02] border border-navy/10 rounded-2xl p-5">
                               {[
-                                { id: 0, text: "Validating safe card instruments..." },
-                                { id: 1, text: "Exchanging secure tokens with gateway..." },
-                                { id: 2, text: "Authenticating premium fund clearance..." },
+                                { id: 0, text: "Initiating Hyparrow Secure Session..." },
+                                { id: 1, text: "Tokenizing payment instruments via Hyparrow API..." },
+                                { id: 2, text: "Authenticating funds with issuing bank..." },
                                 { id: 3, text: "Activating premium neural routing cluster..." }
                               ].map((step, idx) => {
                                 const isDone = paymentTrackerStep > step.id;
@@ -3565,134 +3549,41 @@ export default function App() {
                             )}
                           </div>
                         ) : (
-                          /* Normal Credit Card Form layout */
+                          /* Hyparrow Gateway Layout */
                           <>
-                            <div className="space-y-1">
-                              <p className="text-[9px] font-black uppercase tracking-[3px] text-orange">
-                                UPGRADE TRANSACTION
-                              </p>
-                              <h3 className="text-2xl font-display font-black uppercase italic tracking-tight text-navy">
-                                SECURE CHECKOUT
-                              </h3>
-                            </div>
-
-                            {/* Visual Virtual Card */}
-                            <div className="bg-gradient-to-tr from-navy to-navy/80 text-white p-6 rounded-3xl space-y-8 shadow-xl shadow-navy/25 relative overflow-hidden">
-                              <div className="absolute top-0 right-0 p-6 opacity-10">
-                                <ShieldCheck className="w-24 h-24 text-orange" />
-                              </div>
-                              
-                              <div className="flex justify-between items-start">
-                                <span className="text-[9px] font-mono tracking-widest text-white/50 uppercase">
-                                  MAIL VERIFIER AUDITOR
-                                </span>
-                                <Sparkles className="w-6 h-6 text-orange" />
-                              </div>
-
-                              <div className="space-y-4">
-                                <p className="text-lg font-mono tracking-[4px] font-bold">
-                                  {checkoutCardNo || "•••• •••• •••• ••••"}
+                            <div className="flex justify-between items-start mb-2 border-b border-navy/5 pb-4">
+                              <div className="space-y-1">
+                                <p className="text-[9px] font-black uppercase tracking-[3px] text-orange">
+                                  {isAnnual ? "$48.00 USD / YEAR" : "$5.00 USD / MONTH"}
                                 </p>
-                                <div className="flex justify-between items-end">
-                                  <div>
-                                    <p className="text-[8px] font-mono text-white/40 uppercase tracking-widest leading-none">
-                                      Cardholder Name
-                                    </p>
-                                    <p className="text-xs font-mono font-bold tracking-wider truncate max-w-[160px]">
-                                      {checkoutCardName.toUpperCase() || "SECURE AGENT"}
-                                    </p>
-                                  </div>
-                                  <div>
-                                    <p className="text-[8px] font-mono text-white/40 uppercase tracking-widest leading-none">
-                                      Expires
-                                    </p>
-                                    <p className="text-xs font-mono font-bold tracking-wider">
-                                      {checkoutCardExpiry || "MM/YY"}
-                                    </p>
-                                  </div>
-                                </div>
+                                <h3 className="text-2xl font-display font-black uppercase italic tracking-tight text-navy flex items-center gap-2">
+                                  HYPARROW
+                                </h3>
+                              </div>
+                              <div className="bg-navy/5 text-navy px-3 py-1.5 rounded-full flex items-center gap-2">
+                                <Lock className="w-3 h-3 text-orange" />
+                                <span className="text-[8px] font-black uppercase tracking-widest">SECURE PORTAL</span>
                               </div>
                             </div>
 
-                            <form onSubmit={handleCheckoutSubmit} className="space-y-4">
-                              <div className="space-y-1">
-                                <label className="text-[9px] font-black uppercase tracking-widest text-navy/50 pl-1">
-                                  Cardholder Name
-                                </label>
-                                <input 
-                                  type="text"
-                                  required
-                                  value={checkoutCardName}
-                                  onChange={(e) => setCheckoutCardName(e.target.value)}
-                                  placeholder="e.g. John Doe"
-                                  className="w-full bg-navy/5 border border-navy/10 rounded-2xl px-4 py-3 text-xs font-bold text-navy focus:outline-none focus:border-orange focus:bg-white transition-all"
-                                />
-                              </div>
+                                                        {/* Hyparrow Gateway Notice */}
+                            <div className="bg-navy/[0.03] p-6 rounded-3xl border border-navy/10 text-center space-y-4 mb-6">
+                              <ShieldCheck className="w-8 h-8 text-orange mx-auto opacity-50" />
+                              <p className="text-xs font-semibold text-navy/70 leading-relaxed max-w-sm mx-auto">
+                                You will be redirected to the secure Hyparrow payment platform to complete your transaction.
+                              </p>
+                            </div>
 
-                              <div className="space-y-1">
-                                <label className="text-[9px] font-black uppercase tracking-widest text-navy/50 pl-1">
-                                  Card Number
-                                </label>
-                                <input 
-                                  type="text"
-                                  required
-                                  maxLength={19}
-                                  value={checkoutCardNo}
-                                  onChange={(e) => {
-                                    const val = e.target.value.replace(/\s?/g, '').replace(/(\d{4})/g, '$1 ').trim();
-                                    setCheckoutCardNo(val);
-                                  }}
-                                  placeholder="4242 4242 4242 4242"
-                                  className="w-full bg-navy/5 border border-navy/10 rounded-2xl px-4 py-3 text-xs font-mono font-bold text-navy focus:outline-none focus:border-orange focus:bg-white transition-all"
-                                />
-                              </div>
-
-                              <div className="grid grid-cols-2 gap-4">
-                                <div className="space-y-1">
-                                  <label className="text-[9px] font-black uppercase tracking-widest text-navy/50 pl-1">
-                                    Expiration Date
-                                  </label>
-                                  <input 
-                                    type="text"
-                                    required
-                                    maxLength={5}
-                                    value={checkoutCardExpiry}
-                                    onChange={(e) => {
-                                      let val = e.target.value.replace(/\//g, '');
-                                      if (val.length > 2) {
-                                        val = val.slice(0, 2) + '/' + val.slice(2);
-                                      }
-                                      setCheckoutCardExpiry(val);
-                                    }}
-                                    placeholder="MM/YY"
-                                    className="w-full bg-navy/5 border border-navy/10 rounded-2xl px-4 py-3 text-xs font-mono font-bold text-navy focus:outline-none focus:border-orange focus:bg-white transition-all text-center"
-                                  />
-                                </div>
-
-                                <div className="space-y-1">
-                                  <label className="text-[9px] font-black uppercase tracking-widest text-navy/50 pl-1">
-                                    Security Code (CVC)
-                                  </label>
-                                  <input 
-                                    type="password"
-                                    required
-                                    maxLength={4}
-                                    value={checkoutCardCVC}
-                                    onChange={(e) => setCheckoutCardCVC(e.target.value.replace(/\D/g, ''))}
-                                    placeholder="•••"
-                                    className="w-full bg-navy/5 border border-navy/10 rounded-2xl px-4 py-3 text-xs font-mono font-bold text-navy focus:outline-none focus:border-orange focus:bg-white transition-all text-center"
-                                  />
-                                </div>
-                              </div>
-
-                              <button
-                                type="submit"
-                                className="w-full bg-navy text-orange hover:bg-navy/95 py-4 rounded-2xl font-black uppercase tracking-widest text-xs transition-all shadow-xl shadow-navy/10 mt-6 flex items-center justify-center gap-2 cursor-pointer"
-                              >
-                                <Lock className="w-3.5 h-3.5" />
-                                Authenticate & Pay {isAnnual ? "$48.00" : "$5.00"}
-                              </button>
-                            </form>
+                            <button
+                              onClick={(e) => {
+                                e.preventDefault();
+                                handleCheckoutSubmit(e as any);
+                              }}
+                              className="w-full bg-navy text-orange hover:bg-navy/95 py-4 rounded-2xl font-black uppercase tracking-widest text-xs transition-all shadow-xl shadow-navy/10 flex items-center justify-center gap-2 cursor-pointer"
+                            >
+                              <Lock className="w-3.5 h-3.5" />
+                              Continue to Hyparrow
+                            </button>
                           </>
                         )}
                       </div>

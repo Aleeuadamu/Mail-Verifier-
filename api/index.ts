@@ -37,7 +37,7 @@ app.use(express.json());
 
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per `window` (here, per 15 minutes)
+  max: 10000, // Limit each IP to 10000 requests per `window` (here, per 15 minutes)
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req, res) => {
@@ -47,7 +47,7 @@ const apiLimiter = rateLimit({
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 20,
+  max: 2000,
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req, res) => {
@@ -63,7 +63,7 @@ import crypto from "crypto";
 app.use(cookieSession({
   name: 'session',
   keys: [process.env.SESSION_SECRET || 'mailverifier_fallback_secret_123'],
-  maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+  maxAge: 24 * 60 * 60 * 1000, // 1 day default
   secure: true,
   sameSite: 'none',
   httpOnly: true,
@@ -164,6 +164,11 @@ app.post("/api/auth/register", authLimiter, async (req, res) => {
 
     const user = await dbService.createUser(email, passwordHash, name);
     req.session!.userId = user.id;
+    if (rememberMe) {
+      req.sessionOptions.maxAge = 30 * 24 * 60 * 60 * 1000; // 30 days
+    } else {
+      req.sessionOptions.maxAge = 24 * 60 * 60 * 1000; // 1 day
+    }
 
     res.json({ success: true, user: { id: user.id, email: user.email, name: user.name, subscription: user.subscription } });
   } catch (error: any) {
@@ -173,7 +178,7 @@ app.post("/api/auth/register", authLimiter, async (req, res) => {
 });
 
 app.post("/api/auth/login", authLimiter, async (req, res) => {
-  const { email, password } = req.body;
+  const { email, password, rememberMe } = req.body;
   if (!email || !password) {
     return res.status(400).json({ error: "Email and password are required" });
   }
@@ -286,7 +291,7 @@ app.get("/api/auth/google/url", (req, res) => {
   );
 
   const scope = [
-    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile"
@@ -461,24 +466,35 @@ function buildMimeMessage({
   to,
   subject,
   body,
-  attachments = []
+  attachments = [],
+  inReplyTo = "",
+  references = ""
 }: {
   to: string;
   subject: string;
   body: string;
   attachments?: { name: string; type: string; data: string }[];
+  inReplyTo?: string;
+  references?: string;
 }) {
   const boundary = "FOO_BAR_BOUNDARY";
   const nl = "\r\n";
 
-  let header = [
+  let headerArr = [
     `To: ${to}`,
     `Subject: ${subject}`,
-    `MIME-Version: 1.0`,
-    `Content-Type: multipart/mixed; boundary="${boundary}"`,
-    "",
-    ""
-  ].join(nl);
+    `MIME-Version: 1.0`
+  ];
+  if (inReplyTo) {
+    headerArr.push(`In-Reply-To: ${inReplyTo}`);
+  }
+  if (references) {
+    headerArr.push(`References: ${references}`);
+  }
+  headerArr.push(`Content-Type: multipart/mixed; boundary="${boundary}"`);
+  headerArr.push("");
+  headerArr.push("");
+  let header = headerArr.join(nl);
 
   let bodyPart = [
     `--${boundary}`,
@@ -518,6 +534,40 @@ function buildMimeMessage({
   return encoded;
 }
 
+app.post("/api/gmail/mark-read", async (req, res) => {
+  const uid = req.session?.userId || req.headers['x-firebase-uid'] as string;
+  if (!uid) return res.status(401).json({ error: "No UID provided" });
+  
+  const { messageId } = req.body;
+  if (!messageId) return res.status(400).json({ error: "Missing messageId" });
+
+  const token = await getGmailTokenForUser(uid);
+  if (!token) return res.status(401).json({ error: "No Gmail token found." });
+
+  const client = new google.auth.OAuth2();
+  client.setCredentials({ access_token: token });
+  const gmail = google.gmail({ version: "v1", auth: client });
+
+  try {
+    await gmail.users.messages.modify({
+      userId: "me",
+      id: messageId,
+      requestBody: {
+        removeLabelIds: ["UNREAD"],
+      },
+    });
+    res.json({ success: true });
+  } catch (error: any) {
+    // Ignore or log softly if scope is insufficient
+    if (error?.message?.includes("insufficient authentication scopes")) {
+      console.log("mark-read skipped due to insufficient scopes (user needs to re-auth)");
+    } else {
+      console.error("Gmail mark-read error:", error?.message);
+    }
+    res.status(500).json({ error: error?.message || "Failed to mark as read" });
+  }
+});
+
 app.post("/api/gmail/send", async (req, res) => {
   const uid = req.session?.userId || req.headers['x-firebase-uid'] as string;
   if (!uid) return res.status(401).json({ error: "No UID provided" });
@@ -525,7 +575,7 @@ app.post("/api/gmail/send", async (req, res) => {
   const token = await getGmailTokenForUser(uid);
   if (!token) return res.status(401).json({ error: "No Gmail token found. Please reconnect Google account." });
 
-  const { to, subject, body, attachments } = req.body;
+  const { to, subject, body, attachments, replyToMessageId } = req.body;
   if (!to || !subject || !body) {
     return res.status(400).json({ error: "Missing required fields (to, subject, body)" });
   }
@@ -536,11 +586,32 @@ app.post("/api/gmail/send", async (req, res) => {
   const gmail = google.gmail({ version: "v1", auth: client });
 
   try {
-    const rawMessage = buildMimeMessage({ to, subject, body, attachments });
+    let inReplyTo = "";
+    let references = "";
+    let threadId = "";
+    if (replyToMessageId) {
+      try {
+        const origMsg = await gmail.users.messages.get({ userId: "me", id: replyToMessageId, format: "metadata", metadataHeaders: ["Message-ID", "References"] });
+        const headers = origMsg.data.payload?.headers || [];
+        const msgIdHeader = headers.find(h => h.name.toLowerCase() === "message-id");
+        const refsHeader = headers.find(h => h.name.toLowerCase() === "references");
+        if (msgIdHeader && msgIdHeader.value) {
+          inReplyTo = msgIdHeader.value;
+          references = refsHeader && refsHeader.value ? refsHeader.value + " " + inReplyTo : inReplyTo;
+        }
+        if (origMsg.data.threadId) {
+          threadId = origMsg.data.threadId;
+        }
+      } catch (e) {
+        console.warn("Could not fetch original message for threading", e);
+      }
+    }
+    const rawMessage = buildMimeMessage({ to, subject, body, attachments, inReplyTo, references });
     const response = await gmail.users.messages.send({
       userId: "me",
       requestBody: {
         raw: rawMessage,
+        ...(threadId ? { threadId } : {})
       },
     });
 
@@ -767,13 +838,13 @@ Expected JSON Schema:
     "homograph_attack_detected": boolean,
     "domain_similarity_score": number
   },
-  "summary_markdown": "string" // MANDATORY! A clear markdown summary of the findings, including Key Findings, Threat Analysis, Final Verdict, and Recommended Action.
+  "summary_markdown": "string" // MANDATORY! A clear markdown summary of the findings. You MUST include these exact headings: ### 📧 EMAIL CLASSIFICATION, ### 📊 RISK SCORE, ### 🔍 KEY FINDINGS, ### ⚠️ THREAT ANALYSIS, ### 🧠 METADATA INSIGHTS, ### ⚖️ FINAL VERDICT, and ### 🛡️ RECOMMENDATIONS.
 }
     `;
   }
 
   try {
-    const modelsToTry = ["gemini-2.5-flash", "gemini-2.5-pro"];
+    const modelsToTry = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-pro"];
     let responseText = "";
     let success = false;
     let lastError: any = null;
@@ -864,7 +935,7 @@ NEW USER QUESTION: ${question}
   `;
 
   try {
-    const modelsToTry = ["gemini-2.5-flash", "gemini-2.5-pro"];
+    const modelsToTry = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-pro"];
     let responseText = "";
     let success = false;
     let lastError: any = null;
