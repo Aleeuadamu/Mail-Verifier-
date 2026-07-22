@@ -268,6 +268,24 @@ app.delete("/api/admin/users/:id", async (req, res) => {
   res.json({ success: true });
 });
 
+app.post("/api/admin/users/:id/subscription", async (req, res) => {
+  const currentUid = req.session?.userId || req.headers['x-firebase-uid'] as string;
+  if (!currentUid) return res.status(401).json({ error: "Unauthorized" });
+  const requestingUser = await dbService.getUserById(currentUid);
+  if (!requestingUser?.isAdmin) return res.status(403).json({ error: "Forbidden" });
+
+  const { id } = req.params;
+  const { subscription } = req.body;
+  if (!subscription) return res.status(400).json({ error: "Missing subscription data" });
+
+  const updatedUser = await dbService.updateUserSubscription(id, subscription);
+  if (!updatedUser) {
+    return res.status(404).json({ error: "User not found" });
+  }
+
+  res.json({ success: true, subscription: updatedUser.subscription });
+});
+
 app.get("/api/auth/google/url", (req, res) => {
   const userId = req.session?.userId || req.headers['x-firebase-uid'] as string || req.query.uid as string;
   const isLoginFlow = !userId;
@@ -844,7 +862,7 @@ Expected JSON Schema:
   }
 
   try {
-    const modelsToTry = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-pro"];
+    const modelsToTry = ["gemini-3.6-flash", "gemini-3.1-pro-preview"];
     let responseText = "";
     let success = false;
     let lastError: any = null;
@@ -935,7 +953,7 @@ NEW USER QUESTION: ${question}
   `;
 
   try {
-    const modelsToTry = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-pro"];
+    const modelsToTry = ["gemini-3.6-flash", "gemini-3.1-pro-preview"];
     let responseText = "";
     let success = false;
     let lastError: any = null;

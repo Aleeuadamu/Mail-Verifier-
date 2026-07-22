@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect } from "react";
+import PaystackPop from "@paystack/inline-js";
 import {
   ShieldAlert,
   ShieldCheck,
@@ -157,8 +158,16 @@ export default function App() {
 
   const isPremiumActive = () => {
     if (!subscription) return false;
-    // If the plan is not "free", they have paid/premium access
-    if (subscription.plan !== "free") return true;
+    // If the plan is not "free", check if it's expired
+    if (subscription.plan !== "free") {
+      if (subscription.currentPeriodEnd) {
+         const end = new Date(subscription.currentPeriodEnd).getTime();
+         if (Date.now() > end) {
+            return false;
+         }
+      }
+      return true;
+    }
     
     // If they are on "free", check if they are within the 1-week (7 days) trial
     if (subscription.trialStartDate) {
@@ -167,9 +176,24 @@ export default function App() {
       const now = Date.now();
       return (now - start) < oneWeekMs;
     }
-    
     return true; // default fallback if trialStartDate not set yet
   };
+
+  // Auto-switch to free if expired when component mounts or subscription changes
+  useEffect(() => {
+    if (subscription && subscription.plan !== "free" && subscription.currentPeriodEnd) {
+       const end = new Date(subscription.currentPeriodEnd).getTime();
+       if (Date.now() > end && user?.id) {
+          const updatedSub = { ...subscription, plan: "free", currentPeriodEnd: null };
+          setSubscription(updatedSub);
+          fetch("/api/auth/subscription", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ subscription: updatedSub }),
+          }).catch(console.error);
+       }
+    }
+  }, [subscription, user?.id]);
 
   const getTrialDaysRemaining = () => {
     if (!subscription || !subscription.trialStartDate) return 0;
@@ -919,25 +943,52 @@ export default function App() {
     }
   };
 
-  const openCheckoutModal = (plan: "pro" | "enterprise") => {
-    setCheckoutPlan(plan);
-    setCheckoutCardName("");
-    setCheckoutCardNo("");
-    setCheckoutCardExpiry("");
-    setCheckoutCardCVC("");
-  };
-
-  const handleCheckoutSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!checkoutPlan) return;
-
+  const initiateCheckout = (plan: "pro" | "enterprise") => {
     setIsProcessingCheckout(true);
-    setPaymentTrackerStep(0);
-    
-    // Simulate short UI loading then redirect
-    setTimeout(() => {
-        window.location.href = "https://hyparrow.com/";
-    }, 1500);
+    const paystack = new PaystackPop();
+    paystack.newTransaction({
+      key: import.meta.env.VITE_PAYSTACK_PUBLIC_KEY || 'pk_test_xxxxxx',
+      email: user?.email || 'customer@example.com',
+      amount: isAnnual ? 65000 * 100 : 6500 * 100,
+      currency: "NGN",
+      onSuccess: async (transaction: any) => {
+        setIsProcessingCheckout(false);
+        const updatedSub = {
+          plan: plan,
+          usage: subscription.usage,
+          paymentMethod: "Paystack",
+          currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+          trialStartDate: subscription.trialStartDate,
+          invoices: [
+            ...(subscription.invoices || []),
+            {
+              id: transaction.reference,
+              date: new Date().toISOString().split("T")[0],
+              amount: isAnnual ? "₦65,000" : "₦6,500",
+              status: "Paid"
+            }
+          ]
+        };
+        setSubscription(updatedSub);
+        if (user?.id) {
+          try {
+            await fetch("/api/auth/subscription", {
+              method: "POST",
+              headers: { 
+                "Content-Type": "application/json",
+                "x-firebase-uid": user.id
+              },
+              body: JSON.stringify({ subscription: updatedSub }),
+            });
+          } catch (e) {
+            console.warn("Failed to sync new plan to server:", e);
+          }
+        }
+      },
+      onCancel: () => {
+        setIsProcessingCheckout(false);
+      }
+    });
   };
 
   const handleDowngradeToFree = async () => {
@@ -3440,157 +3491,6 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Checkout Modal Overlay */}
-                {checkoutPlan && (
-                  <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-navy/60 backdrop-blur-md">
-                    <motion.div 
-                      initial={{ scale: 0.95, opacity: 0 }}
-                      animate={{ scale: 1, opacity: 1 }}
-                      className="bg-white rounded-[3rem] border border-navy/10 shadow-2xl p-8 max-w-lg w-full relative overflow-hidden"
-                    >
-                      {paymentTrackerStep === -1 && (
-                        <button 
-                          onClick={() => setCheckoutPlan(null)}
-                          className="absolute top-6 right-6 p-2 bg-navy/5 rounded-full hover:bg-navy/10 text-navy transition-colors cursor-pointer"
-                        >
-                          <X className="w-4 h-4" />
-                        </button>
-                      )}
-
-                      <div className="space-y-6">
-                        {paymentTrackerStep >= 0 ? (
-                          /* Automated Payment Tracking Screen */
-                          <div className="space-y-6 py-4">
-                            <div className="text-center space-y-2">
-                              <span className="bg-orange/10 text-orange px-3 py-1.5 rounded-full text-[9px] font-black uppercase tracking-[3px] border border-orange/20">
-                                Hyparrow Gateway
-                              </span>
-                              <h3 className="text-2xl font-display font-black uppercase italic tracking-tight text-navy">
-                                {paymentTrackerStep === 4 ? "PAYMENT SUCCESSFUL" : "PROCESSING SECURE FUNDS"}
-                              </h3>
-                              <p className="text-xs text-navy/60 font-semibold max-w-sm mx-auto">
-                                {paymentTrackerStep === 4 
-                                  ? "Your high-speed neural scanning license is now active." 
-                                  : "Tracking your bank handshake in real-time through decentralized routing."
-                                }
-                              </p>
-                            </div>
-
-                            {/* Main Loader / Celebration Visual */}
-                            <div className="relative flex justify-center py-6">
-                              {paymentTrackerStep === 4 ? (
-                                <motion.div 
-                                  animate={{ scale: [1, 1.1, 1] }}
-                                  transition={{ repeat: Infinity, duration: 1.5 }}
-                                  className="relative"
-                                >
-                                  <div className="absolute inset-0 bg-green-500/20 blur-3xl rounded-full" />
-                                  <div className="bg-green-500 text-white p-8 rounded-full relative border-4 border-white shadow-2xl flex items-center justify-center">
-                                    <Check className="w-16 h-16" />
-                                  </div>
-                                </motion.div>
-                              ) : (
-                                <div className="relative w-28 h-28 flex items-center justify-center">
-                                  <div className="absolute inset-0 border-4 border-orange/10 rounded-full" />
-                                  <div className="absolute inset-0 border-4 border-orange border-t-transparent rounded-full animate-spin" />
-                                  <ShieldCheck className="w-10 h-10 text-orange" />
-                                </div>
-                              )}
-                            </div>
-
-                            {/* Status Steps tracking */}
-                            <div className="space-y-3 bg-navy/[0.02] border border-navy/10 rounded-2xl p-5">
-                              {[
-                                { id: 0, text: "Initiating Hyparrow Secure Session..." },
-                                { id: 1, text: "Tokenizing payment instruments via Hyparrow API..." },
-                                { id: 2, text: "Authenticating funds with issuing bank..." },
-                                { id: 3, text: "Activating premium neural routing cluster..." }
-                              ].map((step, idx) => {
-                                const isDone = paymentTrackerStep > step.id;
-                                const isActive = paymentTrackerStep === step.id;
-                                return (
-                                  <div key={idx} className="flex justify-between items-center text-xs font-semibold">
-                                    <div className="flex items-center gap-2.5">
-                                      {isDone ? (
-                                        <Check className="w-4 h-4 text-green-500 shrink-0" />
-                                      ) : isActive ? (
-                                        <Loader2 className="w-4 h-4 text-orange animate-spin shrink-0" />
-                                      ) : (
-                                        <div className="w-4 h-4 rounded-full border-2 border-navy/10 shrink-0" />
-                                      )}
-                                      <span className={cn(
-                                        isDone ? "text-navy/50 line-through" : isActive ? "text-navy font-bold" : "text-navy/30"
-                                      )}>
-                                        {step.text}
-                                      </span>
-                                    </div>
-                                    <span className="font-mono text-[9px] font-black tracking-wider text-navy/40">
-                                      {isDone ? "SUCCESS" : isActive ? "ACTIVE" : "PENDING"}
-                                    </span>
-                                  </div>
-                                );
-                              })}
-                            </div>
-
-                            {/* Success countdown banner */}
-                            {paymentTrackerStep === 4 && (
-                              <motion.div 
-                                initial={{ opacity: 0, y: 10 }}
-                                animate={{ opacity: 1, y: 0 }}
-                                className="bg-navy text-white rounded-2xl p-4 text-center space-y-1 shadow-lg"
-                              >
-                                <p className="text-[9px] font-black uppercase tracking-[2px] text-orange">
-                                  REDIRECTING SECURE AGENT IN
-                                </p>
-                                <p className="font-mono text-3xl font-black text-orange leading-none mt-1">
-                                  {trackerSuccessCountdown} <span className="text-sm font-semibold">SEC</span>
-                                </p>
-                              </motion.div>
-                            )}
-                          </div>
-                        ) : (
-                          /* Hyparrow Gateway Layout */
-                          <>
-                            <div className="flex justify-between items-start mb-2 border-b border-navy/5 pb-4">
-                              <div className="space-y-1">
-                                <p className="text-[9px] font-black uppercase tracking-[3px] text-orange">
-                                  {isAnnual ? "$48.00 USD / YEAR" : "$5.00 USD / MONTH"}
-                                </p>
-                                <h3 className="text-2xl font-display font-black uppercase italic tracking-tight text-navy flex items-center gap-2">
-                                  HYPARROW
-                                </h3>
-                              </div>
-                              <div className="bg-navy/5 text-navy px-3 py-1.5 rounded-full flex items-center gap-2">
-                                <Lock className="w-3 h-3 text-orange" />
-                                <span className="text-[8px] font-black uppercase tracking-widest">SECURE PORTAL</span>
-                              </div>
-                            </div>
-
-                                                        {/* Hyparrow Gateway Notice */}
-                            <div className="bg-navy/[0.03] p-6 rounded-3xl border border-navy/10 text-center space-y-4 mb-6">
-                              <ShieldCheck className="w-8 h-8 text-orange mx-auto opacity-50" />
-                              <p className="text-xs font-semibold text-navy/70 leading-relaxed max-w-sm mx-auto">
-                                You will be redirected to the secure Hyparrow payment platform to complete your transaction.
-                              </p>
-                            </div>
-
-                            <button
-                              onClick={(e) => {
-                                e.preventDefault();
-                                handleCheckoutSubmit(e as any);
-                              }}
-                              className="w-full bg-navy text-orange hover:bg-navy/95 py-4 rounded-2xl font-black uppercase tracking-widest text-xs transition-all shadow-xl shadow-navy/10 flex items-center justify-center gap-2 cursor-pointer"
-                            >
-                              <Lock className="w-3.5 h-3.5" />
-                              Continue to Hyparrow
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </motion.div>
-                  </div>
-                )}
-
                 {/* Universal Upgrade Prompt Modal Overlay */}
                 {showUpgradePrompt && (
                   <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-navy/60 backdrop-blur-md">
@@ -3632,7 +3532,7 @@ export default function App() {
                           onClick={() => {
                             setShowUpgradePrompt(null);
                             setView("subscription");
-                            openCheckoutModal("pro");
+                            initiateCheckout("pro");
                           }}
                           className="w-full bg-navy text-orange hover:bg-navy/95 py-4 rounded-2xl font-black uppercase tracking-widest text-xs transition-all shadow-xl shadow-navy/10 flex items-center justify-center gap-2 cursor-pointer"
                         >
@@ -3829,9 +3729,12 @@ export default function App() {
                         <p className="text-xs text-navy/60 leading-relaxed font-semibold">
                           Essential email security evaluation and verification tools.
                         </p>
-                        <div className="flex items-baseline gap-1 pt-2">
-                          <span className="text-5xl font-black text-navy">$0</span>
-                          <span className="text-xs font-bold text-navy/40">/ inbox / mo</span>
+                        <div className="flex flex-col gap-1 pt-2">
+                          <div className="flex items-baseline gap-1">
+                            <span className="text-5xl font-black text-navy">$0</span>
+                            <span className="text-xs font-bold text-navy/40">{isAnnual ? "/ inbox / yr" : "/ inbox / mo"}</span>
+                          </div>
+                          <span className="text-sm font-semibold text-navy/50">₦0 NGN</span>
                         </div>
                         <hr className="border-navy/5" />
                         <ul className="space-y-3.5 text-xs text-navy/70">
@@ -3892,9 +3795,12 @@ export default function App() {
                         <p className="text-xs text-navy/60 leading-relaxed font-semibold">
                           Ultimate continuous real-time cybersecurity shield for your active inboxes.
                         </p>
-                        <div className="flex items-baseline gap-1 pt-2">
-                          <span className="text-5xl font-black text-navy">${isAnnual ? "4" : "5"}</span>
-                          <span className="text-xs font-bold text-navy/40">/ inbox / mo</span>
+                        <div className="flex flex-col gap-1 pt-2">
+                          <div className="flex items-baseline gap-1">
+                            <span className="text-5xl font-black text-navy">${isAnnual ? "48" : "5"}</span>
+                            <span className="text-xs font-bold text-navy/40">{isAnnual ? "/ inbox / yr" : "/ inbox / mo"}</span>
+                          </div>
+                          <span className="text-sm font-semibold text-navy/50">₦{isAnnual ? "65,000" : "6,500"} NGN</span>
                         </div>
                         <hr className="border-navy/5" />
                         <ul className="space-y-3.5 text-xs text-navy/70">
@@ -3927,7 +3833,7 @@ export default function App() {
                       
                       <button 
                         disabled={subscription.plan === "pro"}
-                        onClick={() => openCheckoutModal("pro")}
+                        onClick={() => initiateCheckout("pro")}
                         className={cn(
                           "w-full py-4 rounded-2xl font-black uppercase tracking-widest text-xs transition-all text-center cursor-pointer text-white",
                           subscription.plan === "pro"

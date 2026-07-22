@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { motion } from "motion/react";
-import { Shield, ArrowRight } from "lucide-react";
+import { Shield, ArrowRight, Check, X, RefreshCw } from "lucide-react";
 
 export default function AdminDashboard() {
   const [adminUsers, setAdminUsers] = useState<any[]>([]);
@@ -68,6 +68,35 @@ export default function AdminDashboard() {
       } catch (e) {
         console.error("Error deleting user", e);
       }
+    }
+  };
+
+  const toggleUserSubscription = async (user: any) => {
+    const isPremium = user.subscription && user.subscription.plan !== "free";
+    const action = isPremium ? "downgrade to free" : "upgrade to premium";
+    
+    if (confirm(`Are you sure you want to ${action} for ${user.email}?`)) {
+       try {
+         const newSub = { 
+           ...user.subscription, 
+           plan: isPremium ? "free" : "pro",
+           currentPeriodEnd: isPremium ? null : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+         };
+         const response = await fetch(`/api/admin/users/${user.id}/subscription`, {
+           method: "POST",
+           headers: { "Content-Type": "application/json" },
+           body: JSON.stringify({ subscription: newSub })
+         });
+         
+         if (response.ok) {
+           const updated = await response.json();
+           setAdminUsers(adminUsers.map(u => u.id === user.id ? { ...u, subscription: updated.subscription, status: updated.subscription.plan === "free" ? "inactive" : "active" } : u));
+         } else {
+           alert("Failed to update subscription");
+         }
+       } catch (e) {
+         console.error("Error updating subscription", e);
+       }
     }
   };
 
@@ -157,9 +186,14 @@ export default function AdminDashboard() {
                       <p className="text-[10px] font-mono tracking-tighter text-navy/40">{u.contact || "No Contact Info"}</p>
                     </div>
                   </div>
-                  <button onClick={() => handleDeleteUser(u.id)} className="px-4 py-3 text-red-500 bg-red-50 hover:bg-red-100 rounded-xl transition-colors text-[9px] font-black uppercase tracking-widest border border-red-500/10 cursor-pointer">
-                    Purge
-                  </button>
+                  <div className="flex gap-2">
+                    <button onClick={() => toggleUserSubscription(u)} className="px-4 py-3 text-orange bg-orange/10 hover:bg-orange/20 rounded-xl transition-colors text-[9px] font-black uppercase tracking-widest border border-orange/20 cursor-pointer">
+                      {(!u.subscription || u.subscription.plan === 'free') ? "Upgrade" : "Downgrade"}
+                    </button>
+                    <button onClick={() => handleDeleteUser(u.id)} className="px-4 py-3 text-red-500 bg-red-50 hover:bg-red-100 rounded-xl transition-colors text-[9px] font-black uppercase tracking-widest border border-red-500/10 cursor-pointer">
+                      Purge
+                    </button>
+                  </div>
                 </div>
               ))}
               {adminUsers.length === 0 && (
@@ -167,6 +201,48 @@ export default function AdminDashboard() {
                   No records found in database
                 </div>
               )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="bg-white rounded-3xl border border-navy/10 overflow-hidden shadow-2xl shadow-navy/5">
+        <div className="p-6 border-b border-navy/10 flex justify-between items-center bg-navy/[0.02]">
+          <h3 className="text-xs font-black uppercase tracking-widest text-navy">Live Transactions (All Users)</h3>
+        </div>
+        <div className="p-6 h-[300px] overflow-y-auto">
+          {loading ? (
+             <div className="py-8 text-center text-navy/30 text-xs font-bold uppercase tracking-widest animate-pulse">Synchronizing Data...</div>
+          ) : (
+            <div className="space-y-3">
+              {(() => {
+                const allInvoices = adminUsers.flatMap(u => (u.subscription?.invoices || []).map(inv => ({ ...inv, userEmail: u.email, userName: u.name })));
+                allInvoices.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+                
+                if (allInvoices.length === 0) {
+                  return (
+                    <div className="text-center py-8 text-[10px] font-black uppercase tracking-widest text-navy/30">
+                      No transactions found
+                    </div>
+                  );
+                }
+
+                return allInvoices.map((inv, idx) => (
+                  <div key={idx} className="p-4 bg-white rounded-2xl flex items-center justify-between border border-navy/10 shadow-sm">
+                    <div>
+                      <p className="font-black text-sm text-navy tracking-tight">{inv.amount}</p>
+                      <p className="text-[10px] font-mono tracking-tighter text-navy/50">{inv.userName} ({inv.userEmail})</p>
+                      <p className="text-[10px] font-mono tracking-tighter text-navy/40">Ref: {inv.id}</p>
+                    </div>
+                    <div className="text-right">
+                      <span className="px-2 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-full bg-green-500/10 text-green-600">
+                        {inv.status}
+                      </span>
+                      <p className="text-[10px] font-mono tracking-tighter text-navy/40 mt-1">{inv.date}</p>
+                    </div>
+                  </div>
+                ));
+              })()}
             </div>
           )}
         </div>
