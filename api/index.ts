@@ -400,7 +400,8 @@ app.get(["/auth/callback", "/auth/callback/", "/api/auth/callback", "/api/auth/c
         id: existingUser.id,
         email: existingUser.email,
         name: existingUser.name,
-        subscription: existingUser.subscription
+        subscription: existingUser.subscription,
+        isAdmin: existingUser.isAdmin
       };
     } else {
       finalUserId = targetUserId;
@@ -410,7 +411,8 @@ app.get(["/auth/callback", "/auth/callback/", "/api/auth/callback", "/api/auth/c
           id: existingUser.id,
           email: existingUser.email,
           name: existingUser.name,
-          subscription: existingUser.subscription
+          subscription: existingUser.subscription,
+          isAdmin: existingUser.isAdmin
         };
       }
     }
@@ -440,32 +442,40 @@ app.get(["/auth/callback", "/auth/callback/", "/api/auth/callback", "/api/auth/c
           <title>Google Account Connected</title>
           <style>
             body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; background: #0A1128; color: #FFFFFF; margin: 0; text-align: center; }
-            .card { background: #121F42; padding: 40px; border-radius: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); max-width: 400px; border: 1px solid rgba(255, 136, 0, 0.2); }
+            .card { background: #121F42; padding: 40px; border-radius: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); max-width: 420px; border: 1px solid rgba(255, 136, 0, 0.2); }
             h2 { color: #FF8800; margin-top: 0; text-transform: uppercase; font-style: italic; }
             p { font-size: 14px; opacity: 0.8; line-height: 1.6; }
             .spinner { border: 4px solid rgba(255,255,255,0.1); width: 36px; height: 36px; border-radius: 50%; border-left-color: #FF8800; animation: spin 1s linear infinite; margin: 20px auto; }
+            .btn { display: inline-block; margin-top: 20px; background: #FF8800; color: #0A1128; text-decoration: none; padding: 12px 28px; border-radius: 14px; font-weight: 900; text-transform: uppercase; letter-spacing: 1px; font-size: 12px; }
             @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
           </style>
         </head>
         <body>
           <div class="card">
             <h2>Bridge Established</h2>
-            <p>Your Google account has been safely connected. Finalizing secure mail channels...</p>
+            <p>Your Google account has been successfully authenticated. Redirecting to Mail Verifier AI...</p>
             <div class="spinner"></div>
+            <a href="/" class="btn">Click Here If Not Redirected</a>
             <script>
-              setTimeout(() => {
-                if (window.opener) {
-                  window.opener.postMessage({ 
-                    type: 'OAUTH_AUTH_SUCCESS', 
-                    token: '${tokens?.access_token || ""}', 
-                    uid: '${finalUserId}',
-                    user: ${safeUser ? JSON.stringify(safeUser) : 'null'}
-                  }, '${appUrl}');
-                  window.close();
-                } else {
+              const payload = {
+                type: 'OAUTH_AUTH_SUCCESS',
+                token: '${tokens?.access_token || ""}',
+                uid: '${finalUserId}',
+                user: ${safeUser ? JSON.stringify(safeUser) : 'null'}
+              };
+              if (window.opener) {
+                try {
+                  window.opener.postMessage(payload, '*');
+                } catch(e) { console.error(e); }
+                setTimeout(() => {
+                  try { window.close(); } catch(e) {}
                   window.location.href = '/';
-                }
-              }, 1500);
+                }, 1000);
+              } else {
+                setTimeout(() => {
+                  window.location.href = '/';
+                }, 800);
+              }
             </script>
           </div>
         </body>
