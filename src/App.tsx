@@ -3056,6 +3056,40 @@ export default function App() {
                                     <li className="flex gap-3 items-start"><span className="w-2 h-2 rounded-full bg-[#b81d24] mt-2 flex-shrink-0" /><span><strong>Header Alignment:</strong> Message delivered to target account with {result?.authentication_analysis?.domain_alignment ? "matching" : "mismatched"} domain record signatures.</span></li>
                                   </ul>
                                 </div>
+
+                                <div>
+                                  <h3 className="text-xl font-display font-black uppercase tracking-tight text-[#b81d24] mb-3 italic">
+                                    ⚠️ THREAT ANALYSIS
+                                  </h3>
+                                  <p className="text-sm md:text-base font-semibold text-navy/90">
+                                    {result?.sender_identity_analysis?.executive_impersonation
+                                      ? "Executive Impersonation Detected: Domain or display name mimics high-profile authority."
+                                      : "No executive impersonation or malicious link redirect chains detected in message body."}
+                                  </p>
+                                </div>
+
+                                <div>
+                                  <h3 className="text-xl font-display font-black uppercase tracking-tight text-[#b81d24] mb-3 italic">
+                                    ⚖️ FINAL VERDICT
+                                  </h3>
+                                  <p className="text-sm md:text-base font-semibold text-navy/90">
+                                    {(result?.ai_risk_engine?.threat_score || 0) > 60
+                                      ? "HIGH THREAT DETECTED: Exercise extreme caution. Do not click links or share credentials."
+                                      : (result?.ai_risk_engine?.threat_score || 0) > 30
+                                      ? "MODERATE RISK: Verify sender identity via secondary out-of-band communication before taking action."
+                                      : "LOW RISK: Standard email structure with valid authentication protocols."}
+                                  </p>
+                                </div>
+
+                                <div>
+                                  <h3 className="text-xl font-display font-black uppercase tracking-tight text-[#b81d24] mb-3 italic">
+                                    🛡️ RECOMMENDATIONS
+                                  </h3>
+                                  <ul className="space-y-3 text-xs md:text-sm text-navy/80 font-medium">
+                                    <li className="flex gap-3 items-start"><span className="w-2 h-2 rounded-full bg-[#b81d24] mt-2 flex-shrink-0" /><span>Always cross-reference sender domain with known official contact addresses.</span></li>
+                                    <li className="flex gap-3 items-start"><span className="w-2 h-2 rounded-full bg-[#b81d24] mt-2 flex-shrink-0" /><span>Hover over embedded hyperlinks before clicking to verify the underlying destination domain.</span></li>
+                                  </ul>
+                                </div>
                               </div>
                             )}
                           </div>
