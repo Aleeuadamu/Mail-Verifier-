@@ -79,6 +79,10 @@ export interface User {
   subscription: Subscription;
   createdAt: string;
   isAdmin?: boolean;
+  isVerified?: boolean;
+  verificationToken?: string;
+  failedLoginAttempts?: number;
+  lockedUntil?: string | null;
 }
 
 const DB_FILE = path.join(process.cwd(), "db.json");
@@ -144,13 +148,26 @@ const localDb = {
         invoices: []
       },
       createdAt: new Date().toISOString(),
-      isAdmin: false
+      isAdmin: false,
+      isVerified: false,
+      failedLoginAttempts: 0,
+      lockedUntil: null
     };
     data.users[id] = newUser;
     writeLocalDb(data);
     return newUser;
   },
 
+  updateUser(id: string, updates: Partial<User>): User | null {
+    const data = readLocalDb();
+    if (!data.users[id]) return null;
+    data.users[id] = {
+      ...data.users[id],
+      ...updates
+    };
+    writeLocalDb(data);
+    return data.users[id];
+  },
   updateUserSubscription(id: string, subscription: Partial<Subscription>): User | null {
     const data = readLocalDb();
     if (!data.users[id]) return null;
@@ -245,7 +262,10 @@ export const dbService = {
         invoices: []
       },
       createdAt: new Date().toISOString(),
-      isAdmin: false
+      isAdmin: false,
+      isVerified: false,
+      failedLoginAttempts: 0,
+      lockedUntil: null
     };
     try {
       await db.collection("users").doc(id).set(newUser);
@@ -256,6 +276,27 @@ export const dbService = {
     }
   },
 
+  async updateUser(id: string, updates: Partial<User>): Promise<User | null> {
+    if (!db) {
+      return localDb.updateUser(id, updates);
+    }
+    try {
+      const userRef = db.collection("users").doc(id);
+      const doc = await userRef.get();
+      if (!doc.exists) return null;
+      
+      const user = doc.data() as User;
+      const updatedUser = {
+        ...user,
+        ...updates
+      };
+      await userRef.set(updatedUser);
+      return updatedUser;
+    } catch (e: any) {
+      handleDbFallback("updateUser", e);
+      return localDb.updateUser(id, updates);
+    }
+  },
   async updateUserSubscription(id: string, subscription: Partial<Subscription>): Promise<User | null> {
     if (!db) {
       return localDb.updateUserSubscription(id, subscription);

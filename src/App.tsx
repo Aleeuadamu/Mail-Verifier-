@@ -414,6 +414,30 @@ export default function App() {
   const [showMsgOptions, setShowMsgOptions] = useState(false);
 
   // Check auth and setup OAuth message listener on mount
+
+  // SSE for Real-time push alerts
+  useEffect(() => {
+    if (user?.id) {
+      const eventSource = new EventSource(`/api/sse?uid=${user.id}`);
+      eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === "THREAT_DETECTED") {
+            alert(`Real-time Alert: ${data.message} (${data.classification})`);
+            // Refresh inbox automatically to show new mail
+            handleFetchGmail();
+          }
+        } catch (e) {
+          console.error("Failed to parse SSE data", e);
+        }
+      };
+      
+      return () => {
+        eventSource.close();
+      };
+    }
+  }, [user]);
+
   useEffect(() => {
     const checkAuth = async () => {
       try {
@@ -3108,7 +3132,7 @@ export default function App() {
                                      <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Country</span><span className="text-xs font-mono font-bold truncate max-w-[150px]">{result?.location_intelligence?.country || "N/A"}</span></div>
                                      <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">City</span><span className="text-xs font-mono font-bold truncate max-w-[150px]">{result?.location_intelligence?.city || "N/A"}</span></div>
                                      <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">ISP / ASN</span><span className="text-xs font-mono font-bold truncate max-w-[150px]">{result?.location_intelligence?.isp || "N/A"}</span></div>
-                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">VPN / Proxy</span><span className={cn("text-xs font-black uppercase tracking-widest", (result?.location_intelligence?.vpn_detected || result?.location_intelligence?.proxy_detected) ? "text-red-500" : "text-green-500")}>{(result?.location_intelligence?.vpn_detected || result?.location_intelligence?.proxy_detected) ? "DETECTED" : "CLEAN"}</span></div>
+                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">VPN / Proxy</span><span className={cn("text-xs font-black uppercase tracking-widest", result?.location_intelligence?.vpn_detected === "NOT VERIFIED" ? "text-orange" : ((result?.location_intelligence?.vpn_detected || result?.location_intelligence?.proxy_detected) ? "text-red-500" : "text-green-500"))}>{result?.location_intelligence?.vpn_detected === "NOT VERIFIED" ? "NOT VERIFIED" : ((result?.location_intelligence?.vpn_detected || result?.location_intelligence?.proxy_detected) ? "DETECTED" : "CLEAN")}</span></div>
                                   </div>
                                </div>
 
@@ -3146,7 +3170,7 @@ export default function App() {
                                   <div className="space-y-3">
                                      <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Urgency Tech</span><span className={cn("text-[10px] uppercase font-black", result?.social_engineering_detection?.urgency_tactics ? "text-orange" : "text-navy/30")}>{result?.social_engineering_detection?.urgency_tactics ? "DETECTED" : "NONE"}</span></div>
                                      <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Cred Theft</span><span className={cn("text-[10px] uppercase font-black", result?.social_engineering_detection?.credential_theft_attempt ? "text-red-500" : "text-navy/30")}>{result?.social_engineering_detection?.credential_theft_attempt ? "DETECTED" : "NONE"}</span></div>
-                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Malware Host</span><span className={cn("text-[10px] uppercase font-black", result?.threat_intelligence?.malware_hosting_match ? "text-red-500" : "text-navy/30")}>{result?.threat_intelligence?.malware_hosting_match ? "DETECTED" : "NONE"}</span></div>
+                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Malware Host</span><span className={cn("text-[10px] uppercase font-black", result?.threat_intelligence?.malware_hosting_match === "NOT VERIFIED" ? "text-orange" : (result?.threat_intelligence?.malware_hosting_match ? "text-red-500" : "text-navy/30"))}>{result?.threat_intelligence?.malware_hosting_match === "NOT VERIFIED" ? "NOT VERIFIED" : (result?.threat_intelligence?.malware_hosting_match ? "DETECTED" : "NONE")}</span></div>
                                      <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Domain Typo</span><span className={cn("text-[10px] uppercase font-black", result?.domain_similarity_detection?.typosquatting_detected ? "text-red-500" : "text-navy/30")}>{result?.domain_similarity_detection?.typosquatting_detected ? "DETECTED" : "NONE"}</span></div>
                                   </div>
                                </div>

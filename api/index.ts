@@ -55,6 +55,16 @@ const authLimiter = rateLimit({
   }
 });
 
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    res.status(429).json({ error: "Too many login attempts. Please try again in 15 minutes." });
+  }
+});
+
 app.use("/api/", apiLimiter);
 
 import crypto from "crypto";
@@ -137,10 +147,183 @@ You do not access emails yourself. You only analyze structured email data sent t
 GLOBAL RULES - MUST BE STRICTLY ADHERED TO:
 1. NO EMOJIS: Do NOT use any emojis anywhere in your response. No icons, no emoticons. Use clean, plain text and markdown.
 2. STRICTLY FACTUAL: Base your analysis strictly and solely on the actual facts, headers, links, and text content present in the received email. Absolutely no hallucinations, self-generated speculations, or unproved claims.
-3. ESTABLISH UNCERTAINTY: If headers or other metadata are missing or indicate nothing, clearly state "None detected in headers" or "Analysis inconclusive due to missing technical headers" instead of fabricating IP addresses, locations, or findings.
+3. ESTABLISH UNCERTAINTY: You will be given pre-verified technical data. Do not invent or estimate any technical values yourself — only summarize and explain the verified data you are given. If a specific data point was not provided to you, you must say "Not available" rather than estimating it.
 4. CONSISTENT & PROFESSIONAL ARRANGEMENT: Ensure a highly structured, objective, analytical, and professional tone. Your outputs must be clean, neat, and formatted perfectly with standard Markdown, avoiding any conversational filler, casual language, or marketing hype.
 5. USER-SAFETY DRIVEN: Focus on objective security risk assessment.
 `;
+
+
+// SSE for real-time alerts
+const clients = new Map<string, any>();
+
+app.get("/api/sse", (req, res) => {
+  const uid = req.session?.userId || req.query.uid as string;
+  if (!uid) return res.status(401).send("Unauthorized");
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+
+  clients.set(uid, res);
+
+  req.on("close", () => {
+    clients.delete(uid);
+  });
+});
+
+export function sendRealtimeAlert(uid: string, alertData: any) {
+  const client = clients.get(uid);
+  if (client) {
+    client.write(`data: ${JSON.stringify(alertData)}\n\n`);
+  }
+}
+
+// Start Gmail Watch
+app.post("/api/gmail/watch", async (req, res) => {
+  const uid = req.session?.userId || req.headers['x-firebase-uid'] as string;
+  if (!uid) return res.status(401).json({ error: "Unauthorized" });
+
+  const token = await getValidToken(uid);
+  if (!token) return res.status(401).json({ error: "No valid Gmail token" });
+
+  const auth = new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET
+  );
+  auth.setCredentials({ access_token: token });
+  const gmail = google.gmail({ version: "v1", auth });
+
+  try {
+    const topicName = process.env.PUBSUB_TOPIC_NAME || "projects/ai-studio-mailverifier/topics/gmail-push";
+    const watchRes = await gmail.users.watch({
+      userId: "me",
+      requestBody: {
+        topicName,
+        labelIds: ["INBOX"],
+      }
+    });
+    
+    await dbService.updateUser(uid, { gmailHistoryId: watchRes.data.historyId } as any);
+    res.json({ success: true, historyId: watchRes.data.historyId });
+  } catch (err: any) {
+    console.error("Failed to start Gmail watch:", err);
+    // Ignore error if topic doesn't exist, just return success so frontend doesn't break
+    res.json({ success: false, error: err.message });
+  }
+});
+
+// Pub/Sub Webhook for Gmail Push Notifications
+app.post("/api/gmail/webhook", async (req, res) => {
+  try {
+    const message = req.body.message;
+    if (!message || !message.data) {
+      return res.status(400).send("Bad Request");
+    }
+
+    const data = JSON.parse(Buffer.from(message.data, 'base64').toString('utf8'));
+    const emailAddress = data.emailAddress;
+    const newHistoryId = data.historyId;
+
+    if (!emailAddress) return res.status(200).send("OK");
+
+    const user = await dbService.getUserByEmail(emailAddress);
+    if (!user) return res.status(200).send("User not found");
+
+    const token = await getValidToken(user.id);
+    if (!token) return res.status(200).send("OK");
+
+    const auth = new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET
+    );
+    auth.setCredentials({ access_token: token });
+    const gmail = google.gmail({ version: "v1", auth });
+    
+    // In db, we would store startHistoryId for the user, but we will just fetch the latest history
+    // Since we can't reliably know the old historyId without adding it to the db, let's assume we added it.
+    const oldHistoryId = (user as any).gmailHistoryId || Math.max(0, parseInt(newHistoryId) - 100).toString();
+    
+    const historyRes = await gmail.users.history.list({
+      userId: "me",
+      startHistoryId: oldHistoryId,
+      historyTypes: ["messageAdded"]
+    });
+
+    if (historyRes.data.history) {
+      for (const historyItem of historyRes.data.history) {
+        if (historyItem.messagesAdded) {
+          for (const msgAdded of historyItem.messagesAdded) {
+            const msg = await gmail.users.messages.get({
+              userId: "me",
+              id: msgAdded.message!.id!,
+              format: "full"
+            });
+            
+            // Extract basic fields
+            const headers = msg.data.payload?.headers || [];
+            const getHeader = (name: string) => headers.find(h => h.name.toLowerCase() === name.toLowerCase())?.value || "";
+            
+            const emailData = {
+              subject: getHeader("subject"),
+              senderName: getHeader("from").split("<")[0].trim() || getHeader("from"),
+              senderEmail: getHeader("from").match(/<([^>]+)>/)?.[1] || getHeader("from"),
+              body: msg.data.snippet || "",
+              headers: JSON.stringify(headers)
+            };
+
+            // Run analysis
+            const aiData = await analyzeEmailHelper(emailData, "SINGLE_EMAIL_VIEW", user.id);
+            if (aiData?.ai_risk_engine?.final_risk_classification && 
+                ["Suspicious", "Likely Phishing", "Phishing"].includes(aiData.ai_risk_engine.final_risk_classification)) {
+              
+              sendRealtimeAlert(user.id, {
+                type: "THREAT_DETECTED",
+                message: `Suspicious email received from ${emailData.senderEmail}`,
+                classification: aiData.ai_risk_engine.final_risk_classification
+              });
+            }
+          }
+        }
+      }
+    }
+
+    await dbService.updateUser(user.id, { gmailHistoryId: newHistoryId } as any);
+    res.status(200).send("OK");
+  } catch (err: any) {
+    console.error("Webhook error:", err);
+    res.status(200).send("OK"); // Acknowledge pub/sub to prevent retries
+  }
+});
+
+// Cron Endpoint to renew watches
+app.get("/api/cron/renew-watches", async (req, res) => {
+  const users = await dbService.getAllUsers();
+  for (const user of users) {
+    const token = await getValidToken(user.id);
+    if (token) {
+      try {
+        const auth = new google.auth.OAuth2(
+          process.env.GOOGLE_CLIENT_ID,
+          process.env.GOOGLE_CLIENT_SECRET
+        );
+        auth.setCredentials({ access_token: token });
+        const gmail = google.gmail({ version: "v1", auth });
+        const topicName = process.env.PUBSUB_TOPIC_NAME || "projects/ai-studio-mailverifier/topics/gmail-push";
+        const watchRes = await gmail.users.watch({
+          userId: "me",
+          requestBody: {
+            topicName,
+            labelIds: ["INBOX"],
+          }
+        });
+        await dbService.updateUser(user.id, { gmailHistoryId: watchRes.data.historyId } as any);
+      } catch(e) {
+        // ignore
+      }
+    }
+  }
+  res.send("Watches renewed");
+});
 
 // Custom Local Auth routes
 app.get("/api/health", (req, res) => {
@@ -162,22 +345,41 @@ app.post("/api/auth/register", authLimiter, async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(password, salt);
 
-    const user = await dbService.createUser(email, passwordHash, name);
-    req.session!.userId = user.id;
-    if (rememberMe) {
-      req.sessionOptions.maxAge = 30 * 24 * 60 * 60 * 1000; // 30 days
-    } else {
-      req.sessionOptions.maxAge = 24 * 60 * 60 * 1000; // 1 day
-    }
-
-    res.json({ success: true, user: { id: user.id, email: user.email, name: user.name, subscription: user.subscription } });
+    // Generate verification token
+    const token = crypto.randomBytes(32).toString("hex");
+    await dbService.updateUser(user.id, { verificationToken: token, isVerified: false });
+    console.log("\n\n=== ACTION REQUIRED ===\nPlease verify your email by opening this link:");
+    console.log(`http://localhost:3000/api/auth/verify?token=${token}&email=${encodeURIComponent(email)}`);
+    console.log("=======================\n\n");
+    res.json({ success: true, message: "Please check your email to verify your account before logging in." });
   } catch (error: any) {
-    console.error("Registration error:", error);
     res.status(500).json({ error: error?.message || "Failed to register user" });
   }
 });
 
-app.post("/api/auth/login", authLimiter, async (req, res) => {
+app.get("/api/auth/verify", async (req, res) => {
+  const { email, token } = req.query;
+  if (!email || !token || typeof email !== 'string' || typeof token !== 'string') {
+    return res.status(400).send("Invalid verification link.");
+  }
+  try {
+    const user = await dbService.getUserByEmail(email);
+    if (!user) {
+      return res.status(400).send("User not found.");
+    }
+    if (user.isVerified) {
+      return res.send("Account already verified. You can now log in.");
+    }
+    if (user.verificationToken !== token) {
+      return res.status(400).send("Invalid verification token.");
+    }
+    await dbService.updateUser(user.id, { isVerified: true, verificationToken: undefined });
+    res.send("Email verified successfully! You can now log in.");
+  } catch (error) {
+    res.status(500).send("Failed to verify email.");
+  }
+});
+app.post("/api/auth/login", loginLimiter, async (req, res) => {
   const { email, password, rememberMe } = req.body;
   if (!email || !password) {
     return res.status(400).json({ error: "Email and password are required" });
@@ -189,9 +391,28 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
       return res.status(400).json({ error: "Invalid email or password" });
     }
 
+    if (user.lockedUntil && new Date(user.lockedUntil) > new Date()) {
+      return res.status(403).json({ error: "Account is temporarily locked due to too many failed attempts. Try again later." });
+    }
+
     const isMatch = await bcrypt.compare(password, user.passwordHash);
     if (!isMatch) {
+      const attempts = (user.failedLoginAttempts || 0) + 1;
+      let lockedUntil = null;
+      if (attempts >= 5) {
+        lockedUntil = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+      }
+      await dbService.updateUser(user.id, { failedLoginAttempts: attempts, lockedUntil });
       return res.status(400).json({ error: "Invalid email or password" });
+    }
+
+    if (user.isVerified === false) {
+      return res.status(403).json({ error: "Please verify your email address before logging in." });
+    }
+
+    // Reset failed attempts on success
+    if (user.failedLoginAttempts! > 0) {
+      await dbService.updateUser(user.id, { failedLoginAttempts: 0, lockedUntil: null });
     }
 
     req.session!.userId = user.id;
@@ -738,39 +959,82 @@ app.get("/api/gmail/messages", async (req, res) => {
   }
 });
 
-app.post("/api/analyze", async (req, res) => {
-  const uid = req.session?.userId || req.headers['x-firebase-uid'] as string;
-  if (!uid) return res.status(401).json({ error: "Unauthorized" });
 
-  const { data, mode } = req.body;
-  if (!data || !mode) return res.status(400).json({ error: "Missing data or mode" });
+async function resolveTechnicalData(headersStr: string) {
+  const verified = {
+    spf: "NOT VERIFIED",
+    dkim: "NOT VERIFIED",
+    dmarc: "NOT VERIFIED",
+    ip: "NOT VERIFIED",
+    country: "NOT VERIFIED",
+    city: "NOT VERIFIED",
+    isp: "NOT VERIFIED",
+    asn: "NOT VERIFIED",
+    hosting_provider: "NOT VERIFIED",
+    vpn_detected: false,
+    proxy_detected: false,
+    domain_reputation: "NOT VERIFIED"
+  };
+  if (!headersStr) return verified;
 
+  const spfMatch = headersStr.match(/spf=(pass|fail|softfail|neutral|none)/i);
+  if (spfMatch) verified.spf = spfMatch[1].toUpperCase();
+
+  const dkimMatch = headersStr.match(/dkim=(pass|fail|neutral|none)/i);
+  if (dkimMatch) verified.dkim = dkimMatch[1].toUpperCase();
+
+  const dmarcMatch = headersStr.match(/dmarc=(pass|fail)/i);
+  if (dmarcMatch) verified.dmarc = dmarcMatch[1].toUpperCase();
+
+  const ipMatch = headersStr.match(/\[([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})\]/);
+  if (ipMatch) {
+    verified.ip = ipMatch[1];
+    try {
+      // Free IP geolocation API
+      const geoRes = await fetch(`http://ip-api.com/json/${verified.ip}?fields=status,country,city,isp,as,hosting,proxy`);
+      if (geoRes.ok) {
+        const geoData = await geoRes.json();
+        if (geoData.status === "success") {
+          verified.country = geoData.country || "NOT VERIFIED";
+          verified.city = geoData.city || "NOT VERIFIED";
+          verified.isp = geoData.isp || "NOT VERIFIED";
+          verified.asn = geoData.as || "NOT VERIFIED";
+          verified.hosting_provider = geoData.hosting ? "Hosting/Datacenter" : "NOT VERIFIED";
+          verified.vpn_detected = !!geoData.proxy;
+          verified.proxy_detected = !!geoData.proxy;
+        }
+      }
+    } catch (e) {
+      console.warn("Failed to fetch IP geo data", e);
+    }
+  }
+  return verified;
+}
+
+async function analyzeEmailHelper(data: any, mode: string, uid: string) {
   let prompt = "";
 
   if (mode === "INBOX_SCAN") {
     const emailList = Array.isArray(data) ? data : [data];
-    prompt = `
-MODE: INBOX_SCAN
+    prompt = `MODE: INBOX_SCAN
 INPUT: A list of emails.
 TASK: For EACH email return: classification (Safe, Likely Safe, Suspicious, Likely Phishing, Phishing), risk_score (0–100), severity (Low, Medium, High, Critical), short_reason (max 15 words).
 OUTPUT FORMAT: JSON array of objects with keys: subject, sender, classification, risk_score, severity, short_reason.
-EMAILS: ${JSON.stringify(emailList.map(e => ({ subject: e.subject, sender_name: e.senderName, sender_email: e.senderEmail, short_snippet: e.body.substring(0, 200) })))}
-    `;
+EMAILS: ${JSON.stringify(emailList.map(e => ({ subject: e.subject, sender_name: e.senderName, sender_email: e.senderEmail, short_snippet: e.body.substring(0, 200) })))}`;
   } else if (mode === "REALTIME_ALERT") {
     const singleData = Array.isArray(data) ? data[0] : data;
-    prompt = `
-MODE: REALTIME_ALERT
+    prompt = `MODE: REALTIME_ALERT
 INPUT: subject, sender_name, sender_email, short_snippet.
 TASK: Return a short alert message.
 OUTPUT: JSON object with keys: alert_type (Safe, Warning, Danger), message (max 20 words), action_hint (max 10 words).
-EMAIL: ${JSON.stringify({ subject: singleData.subject, sender_name: singleData.senderName, sender_email: singleData.senderEmail, short_snippet: singleData.body.substring(0, 200) })}
-    `;
+EMAIL: ${JSON.stringify({ subject: singleData.subject, sender_name: singleData.senderName, sender_email: singleData.senderEmail, short_snippet: singleData.body.substring(0, 200) })}`;
   } else {
     const singleData = Array.isArray(data) ? data[0] : data;
-    prompt = `
-MODE: SINGLE_EMAIL_VIEW
+    const technicalData = await resolveTechnicalData(singleData.headers || "");
+    prompt = `MODE: SINGLE_EMAIL_VIEW
 INPUT: subject, full_body, sender_name, sender_email, reply_to, links, headers.
-TASK: Perform a complete audit of the email. You must extract and analyze the following categories as exhaustively as possible based on the available data. If data for a feature is unavailable, mark it as "NOT VERIFIED" or null.
+VERIFIED_TECHNICAL_DATA: ${JSON.stringify(technicalData)}
+TASK: Perform a complete audit of the email. You will be given pre-verified technical data in VERIFIED_TECHNICAL_DATA. Do not invent or estimate any technical values yourself (like SPF/DKIM, IPs, locations, ISPs, VPNs, or Threat Intel) — only summarize and explain the verified data you are given. If a specific data point was not provided or says "NOT VERIFIED", you MUST output "Not available" or "NOT VERIFIED" rather than estimating it or hallucinating it.
 Respond ONLY with a valid JSON object matching this schema. NO Markdown formatting blocks around the JSON.
 EMAIL_SUBJECT: ${singleData.subject}
 SENDER_NAME: ${singleData.senderName}
@@ -779,7 +1043,6 @@ REPLY_TO: ${singleData.replyTo || "N/A"}
 LINKS: ${singleData.links || "N/A"}
 HEADERS: ${singleData.headers || "N/A"}
 BODY: ${singleData.body}
-
 Expected JSON Schema:
 {
   "email_metadata_analysis": {
@@ -810,24 +1073,19 @@ Expected JSON Schema:
     "name_domain_mismatch": boolean,
     "executive_impersonation": boolean,
     "brand_impersonation": boolean,
-    "lookalike_sender": boolean,
-    "spoofing_detected": boolean,
-    "sender_trust_score": number
-  },
-  "domain_intelligence": {
-    "domain_age_estimation": string | null,
-    "domain_reputation": string | "NOT VERIFIED",
-    "business_ownership": string | "NOT VERIFIED",
-    "website_category": string | null,
-    "domain_risk_score": number
+    "new_domain_detected": boolean
   },
   "authentication_analysis": {
-    "spf_validation": string | "NOT VERIFIED",
-    "dkim_validation": string | "NOT VERIFIED",
-    "dmarc_validation": string | "NOT VERIFIED",
-    "arc_validation": string | "NOT VERIFIED",
-    "domain_alignment": boolean,
-    "authentication_score": number
+    "spf_record": string | "NOT VERIFIED",
+    "dkim_signature": string | "NOT VERIFIED",
+    "dmarc_policy": string | "NOT VERIFIED",
+    "domain_alignment": boolean | "NOT VERIFIED"
+  },
+  "link_and_content_analysis": {
+    "suspicious_links_detected": boolean | "NOT VERIFIED",
+    "url_shortener_used": boolean | "NOT VERIFIED",
+    "homograph_attack_detected": boolean | "NOT VERIFIED",
+    "domain_similarity_score": number | "NOT VERIFIED"
   },
   "email_routing_analysis": {
     "route_tracing_possible": boolean,
@@ -835,10 +1093,10 @@ Expected JSON Schema:
     "route_anomaly_detected": boolean
   },
   "threat_intelligence": {
-    "phishing_domain_match": boolean,
-    "malware_hosting_match": boolean,
-    "spam_reputation_match": boolean,
-    "blacklist_match": boolean
+    "phishing_domain_match": boolean | "NOT VERIFIED",
+    "malware_hosting_match": boolean | "NOT VERIFIED",
+    "spam_reputation_match": boolean | "NOT VERIFIED",
+    "blacklist_match": boolean | "NOT VERIFIED"
   },
   "social_engineering_detection": {
     "urgency_tactics": boolean,
@@ -861,72 +1119,75 @@ Expected JSON Schema:
     "first_time_sender": boolean,
     "historical_trust": string | "NOT VERIFIED"
   },
-  "domain_similarity_detection": {
-    "typosquatting_detected": boolean,
-    "homograph_attack_detected": boolean,
-    "domain_similarity_score": number
-  },
-  "summary_markdown": "string" // MANDATORY! A clear markdown summary of the findings. You MUST include these exact headings: ### 📧 EMAIL CLASSIFICATION, ### 📊 RISK SCORE, ### 🔍 KEY FINDINGS, ### ⚠️ THREAT ANALYSIS, ### 🧠 METADATA INSIGHTS, ### ⚖️ FINAL VERDICT, and ### 🛡️ RECOMMENDATIONS.
+  "summary_markdown": "string"
 }
-    `;
+`;
   }
 
-  try {
-    const modelsToTry = ["gemini-3.6-flash", "gemini-3.1-pro-preview"];
-    let responseText = "";
-    let success = false;
-    let lastError: any = null;
+  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  const modelsToTry = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-8b",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+  ];
 
-    for (const model of modelsToTry) {
-      let attempts = 0;
-      const maxAttempts = 3;
-      while (attempts < maxAttempts && !success) {
-        try {
-          console.log(`Analyzing email with model: ${model} (attempt ${attempts + 1}/${maxAttempts})`);
-          const response = await getAiClient().models.generateContent({
-            model: model,
-            contents: [{ parts: [{ text: prompt }] }],
-            config: {
-              systemInstruction: SYSTEM_INSTRUCTION,
-              temperature: 0.1,
-              responseMimeType: "application/json"
-            },
-          });
-          responseText = response.text || "";
-          success = true;
-          console.log(`Analysis success with model: ${model}`);
-        } catch (err: any) {
-          attempts++;
-          lastError = err;
-          console.warn(`Attempt ${attempts} failed for model ${model}:`, err.message || err);
-          if (attempts < maxAttempts) {
-            let delay = Math.pow(2, attempts) * 500;
-            if (err?.status === 429 || err?.message?.includes("429") || err?.message?.includes("RESOURCE_EXHAUSTED")) {
-              delay = 15000; // wait 15 seconds on quota limit
-            }
-            await new Promise((resolve) => setTimeout(resolve, delay));
-          }
+  let success = false;
+  let responseText = "";
+  let lastError = null;
+
+  for (const model of modelsToTry) {
+    let attempts = 0;
+    const maxAttempts = 2;
+
+    while (attempts < maxAttempts) {
+      try {
+        const response = await ai.models.generateContent({
+          model: model,
+          contents: [{ parts: [{ text: prompt }] }],
+          config: {
+            systemInstruction: SYSTEM_INSTRUCTION,
+            temperature: 0.1,
+            responseMimeType: "application/json"
+          },
+        });
+
+        responseText = response.text || "";
+        success = true;
+        break;
+      } catch (err: any) {
+        attempts++;
+        lastError = err;
+        if (attempts < maxAttempts) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
         }
       }
-      if (success) break;
     }
+    if (success) break;
+  }
 
-    if (!success) {
-      throw lastError || new Error("All models failed analysis");
-    }
+  if (!success) {
+    throw new Error("All AI models failed");
+  }
 
-    let cleanedText = responseText.trim();
-    if (cleanedText.startsWith("```")) {
-      cleanedText = cleanedText.replace(/^```(?:json)?\n?/i, "").replace(/\n?```$/, "").trim();
-    }
-    const result = JSON.parse(cleanedText);
+  return JSON.parse(responseText.trim().replace(/^\s*```json/m, "").replace(/```\s*$/m, ""));
+}
 
+app.post("/api/analyze", async (req, res) => {
+  const uid = req.session?.userId || req.headers['x-firebase-uid'] as string;
+  if (!uid) return res.status(401).json({ error: "Unauthorized" });
+
+  const { data, mode } = req.body;
+  if (!data || !mode) return res.status(400).json({ error: "Missing data or mode" });
+
+  try {
+    const result = await analyzeEmailHelper(data, mode, uid);
     res.json({ result });
-  } catch (error: any) {
-    console.error("Gemini Analysis Error:", error);
-    res.status(500).json({ error: error.message || "Analysis failed" });
+  } catch(e: any) {
+    res.status(500).json({ error: "AI Analysis failed" });
   }
 });
+
 
 app.post("/api/chat-message", async (req, res) => {
   const uid = req.session?.userId || req.headers['x-firebase-uid'] as string;
