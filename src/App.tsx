@@ -2942,7 +2942,7 @@ export default function App() {
                           </div>
                         )}
 
-                        {/* Audited Sender Registry Card (Always present even if zero threat) */}
+                        {/* Audited Sender Registry Card */}
                         <div className="bg-navy/[0.03] border border-navy/10 p-5 rounded-[2rem] space-y-3">
                           <div className="flex justify-between items-center pb-2 border-b border-navy/5">
                             <span className="text-[9px] font-black uppercase tracking-widest text-navy/40">
@@ -2979,182 +2979,87 @@ export default function App() {
                           </div>
                         </div>
 
-                        {/* Quick Score Card */}
-                        <div className="p-8 bg-orange text-navy rounded-[3rem] space-y-4 shadow-2xl shadow-orange/20 relative overflow-hidden">
-                          <div className="absolute top-0 right-0 p-8 opacity-10">
-                            <Fingerprint className="w-24 h-24 rotate-12" />
-                          </div>
-                          <div className="flex justify-between items-center text-[10px] font-black uppercase tracking-[4px] opacity-60">
-                            <span>Threat / Trust Score</span>
-                            <ShieldAlert className="w-4 h-4" />
-                          </div>
-                          <div className="text-8xl font-display font-black italic tracking-tighter leading-none flex gap-8 items-end">
-                            <div>
-                               <span className="text-sm uppercase font-black opacity-50 block mb-2">Threat</span>
-                               {result?.ai_risk_engine?.threat_score || "0"}
+                        {/* Analysis Report Document Container with Top Red Banner */}
+                        <div className="bg-slate-100/80 border border-navy/10 rounded-[2.5rem] overflow-hidden shadow-xl">
+                          {/* Top Red Header Banner (Matching exact user UI screenshot) */}
+                          <div className="bg-[#b81d24] text-white px-8 py-5 flex justify-between items-center border-b border-red-900/20">
+                            <div className="space-y-0.5">
+                              <h2 className="text-sm md:text-base font-display font-black uppercase tracking-wider text-white italic">
+                                {formData.subject
+                                  ? `${formData.subject} ${result?.ai_risk_engine?.final_risk_classification ? `(${result.ai_risk_engine.final_risk_classification.toUpperCase()})` : ''}`
+                                  : (result?.ai_risk_engine?.final_risk_classification || "SECURITY RISK ANALYSIS REPORT").toUpperCase()}
+                              </h2>
                             </div>
-                            <div className="text-4xl text-navy/40">/</div>
-                            <div>
-                               <span className="text-sm uppercase font-black opacity-50 block mb-2">Trust</span>
-                               {result?.ai_risk_engine?.trust_score || "0"}
+                            <div className="text-right shrink-0 ml-4">
+                              <span className="text-[10px] md:text-xs font-black uppercase tracking-widest bg-black/30 px-3 py-1.5 rounded-full text-white/90">
+                                MAGNITUDE: {(result?.ai_risk_engine?.threat_score || 0) > 60 ? "HIGH" : (result?.ai_risk_engine?.threat_score || 0) > 30 ? "MEDIUM" : "LOW"}
+                              </span>
                             </div>
                           </div>
-                          <div className="flex justify-between items-end pt-4 border-t border-navy/10">
-                            <span className="text-xs font-black uppercase tracking-widest">
-                              {result?.ai_risk_engine?.final_risk_classification || "ANALYZED"}
-                            </span>
-                            <span className="text-[10px] font-bold uppercase opacity-60">
-                              Confidence: {result?.ai_risk_engine?.confidence_score || "—"}%
-                            </span>
-                          </div>
-                        </div>
 
-                        {/* Comprehensive AI Threat Audit Breakdown (7 Core Insight Sections) */}
-                        <div className="space-y-6 pt-2">
-                          <div className="bg-navy text-white p-6 rounded-[2.5rem] space-y-4 shadow-xl">
-                            <div className="flex items-center gap-3 pb-3 border-b border-white/10">
-                              <ShieldCheck className="text-orange w-6 h-6" />
-                              <div>
-                                <h3 className="text-lg font-display font-black uppercase tracking-tight italic">
-                                  AI Threat Audit Insights
-                                </h3>
-                                <p className="text-[9px] font-black uppercase tracking-[3px] text-orange">
-                                  7-Point Neural Security Verification
-                                </p>
+                          {/* Report Body / Markdown Rendering */}
+                          <div className="p-8 space-y-6">
+                            {result?.summary_markdown ? (
+                              <div className="markdown-container text-navy w-full">
+                                <ReactMarkdown
+                                  remarkPlugins={[remarkGfm]}
+                                  components={{
+                                    h3: ({ ...props }) => (
+                                      <h3 className="text-xl md:text-2xl font-display font-black uppercase tracking-tight text-[#b81d24] mb-3 mt-8 first:mt-0 italic flex items-center gap-2" {...props}>
+                                        {props.children}
+                                      </h3>
+                                    ),
+                                    h4: ({ ...props }) => (
+                                      <h4 className="text-sm font-black uppercase tracking-widest text-[#b81d24] mb-2 mt-6 flex items-center gap-2" {...props} />
+                                    ),
+                                    p: ({ ...props }) => <p className="text-sm md:text-base leading-relaxed mb-4 font-semibold text-navy/90" {...props} />,
+                                    ul: ({ ...props }) => <ul className="space-y-3 mb-6 list-none p-0" {...props} />,
+                                    li: ({ ...props }) => (
+                                      <li className="text-xs md:text-sm flex gap-3 text-navy/80 leading-relaxed font-medium">
+                                        <span className="w-2 h-2 rounded-full bg-[#b81d24] mt-2 flex-shrink-0" />
+                                        <span>{props.children}</span>
+                                      </li>
+                                    ),
+                                    strong: ({ ...props }) => <strong className="font-black text-navy" {...props} />
+                                  }}
+                                >
+                                  {result.summary_markdown}
+                                </ReactMarkdown>
                               </div>
-                            </div>
-
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
-                              {/* 1. Email Classification */}
-                              <div className="bg-white/5 border border-white/10 p-5 rounded-2xl space-y-2">
-                                <span className="text-[9px] font-black uppercase tracking-widest text-orange block">
-                                  📧 Email Classification
-                                </span>
-                                <div className="flex items-center justify-between">
-                                  <span className="text-sm font-black uppercase tracking-wider text-white">
-                                    {result?.ai_risk_engine?.final_risk_classification || "AUDITED & VERIFIED"}
-                                  </span>
-                                  <span className={cn("text-[9px] font-black uppercase px-2.5 py-1 rounded-full",
-                                    (result?.ai_risk_engine?.final_risk_classification === "Phishing" || result?.ai_risk_engine?.final_risk_classification === "Likely Phishing") ? "bg-red-500/20 text-red-400 border border-red-500/30" :
-                                    result?.ai_risk_engine?.final_risk_classification === "Suspicious" ? "bg-yellow-500/20 text-yellow-400 border border-yellow-500/30" : "bg-green-500/20 text-green-400 border border-green-500/30"
-                                  )}>
-                                    {result?.ai_risk_engine?.final_risk_classification || "Safe"}
-                                  </span>
-                                </div>
-                              </div>
-
-                              {/* 2. Risk Score */}
-                              <div className="bg-white/5 border border-white/10 p-5 rounded-2xl space-y-2">
-                                <div className="flex justify-between items-center">
-                                  <span className="text-[9px] font-black uppercase tracking-widest text-orange">
-                                    📊 Risk Score
-                                  </span>
-                                  <span className="text-sm font-black text-orange">
-                                    {result?.ai_risk_engine?.threat_score || 0} / 100
-                                  </span>
-                                </div>
-                                <div className="w-full bg-white/10 h-2 rounded-full overflow-hidden">
-                                  <div className={cn("h-full rounded-full transition-all duration-500", (result?.ai_risk_engine?.threat_score || 0) > 60 ? "bg-red-500" : (result?.ai_risk_engine?.threat_score || 0) > 30 ? "bg-yellow-500" : "bg-green-500")} style={{ width: `${Math.max(result?.ai_risk_engine?.threat_score || 5, 5)}%` }}></div>
-                                </div>
-                                <p className="text-[9px] text-white/50 font-bold uppercase tracking-wider">
-                                  Confidence Rating: {result?.ai_risk_engine?.confidence_score || 96}%
-                                </p>
-                              </div>
-
-                              {/* 3. Key Findings */}
-                              <div className="bg-white/5 border border-white/10 p-5 rounded-2xl space-y-2 md:col-span-2">
-                                <span className="text-[9px] font-black uppercase tracking-widest text-orange block border-b border-white/10 pb-2">
-                                  🔍 Key Findings
-                                </span>
-                                <ul className="space-y-2 text-xs text-white/80 font-medium">
-                                  <li className="flex gap-2 items-start"><span className="w-1.5 h-1.5 rounded-full bg-orange mt-1.5 flex-shrink-0" /><strong>Sender Validation:</strong> {formData.senderEmail} ({result?.sender_identity_analysis?.spoofing_detected ? "Spoofing Warning" : "Verified Sender Profile"})</li>
-                                  <li className="flex gap-2 items-start"><span className="w-1.5 h-1.5 rounded-full bg-orange mt-1.5 flex-shrink-0" /><strong>Authentication Status:</strong> SPF ({String(result?.authentication_analysis?.spf_validation || "PASS")}), DKIM ({String(result?.authentication_analysis?.dkim_validation || "PASS")}), DMARC ({String(result?.authentication_analysis?.dmarc_validation || "PASS")})</li>
-                                  <li className="flex gap-2 items-start"><span className="w-1.5 h-1.5 rounded-full bg-orange mt-1.5 flex-shrink-0" /><strong>Social Tactics:</strong> {result?.social_engineering_detection?.urgency_tactics ? "Urgency/Pressure Tactics Detected" : "No Manipulation Patterns Flagged"}</li>
-                                </ul>
-                              </div>
-
-                              {/* 4. Threat Analysis */}
-                              <div className="bg-white/5 border border-white/10 p-5 rounded-2xl space-y-2">
-                                <span className="text-[9px] font-black uppercase tracking-widest text-orange block border-b border-white/10 pb-2">
-                                  ⚠️ Threat Analysis
-                                </span>
-                                <div className="space-y-1.5 text-xs">
-                                  <div className="flex justify-between"><span className="text-white/60">Executive Impersonation:</span><span className="font-bold">{result?.sender_identity_analysis?.executive_impersonation ? "DETECTED" : "CLEAN"}</span></div>
-                                  <div className="flex justify-between"><span className="text-white/60">Phishing Domain Match:</span><span className="font-bold">{result?.threat_intelligence?.phishing_domain_match ? "ALERT" : "CLEAN"}</span></div>
-                                  <div className="flex justify-between"><span className="text-white/60">Credential Theft Attempt:</span><span className="font-bold">{result?.social_engineering_detection?.credential_theft_attempt ? "DETECTED" : "CLEAN"}</span></div>
-                                </div>
-                              </div>
-
-                              {/* 5. Metadata Insights */}
-                              <div className="bg-white/5 border border-white/10 p-5 rounded-2xl space-y-2">
-                                <span className="text-[9px] font-black uppercase tracking-widest text-orange block border-b border-white/10 pb-2">
-                                  🧠 Metadata Insights
-                                </span>
-                                <div className="space-y-1.5 text-xs">
-                                  <div className="flex justify-between"><span className="text-white/60">Origin IP:</span><span className="font-mono font-bold">{result?.location_intelligence?.ip_address || "Verified Relay Node"}</span></div>
-                                  <div className="flex justify-between"><span className="text-white/60">Country Origin:</span><span className="font-bold">{result?.location_intelligence?.country || "United States"}</span></div>
-                                  <div className="flex justify-between"><span className="text-white/60">VPN / Proxy Detection:</span><span className="font-bold">{result?.location_intelligence?.vpn_detected ? "DETECTED" : "CLEAN"}</span></div>
-                                </div>
-                              </div>
-
-                              {/* 6. Final Verdict */}
-                              <div className="bg-orange/10 border border-orange/20 p-5 rounded-2xl space-y-2 md:col-span-2">
-                                <span className="text-[9px] font-black uppercase tracking-widest text-orange block border-b border-orange/20 pb-1.5">
-                                  ⚖️ Final Verdict
-                                </span>
-                                <p className="text-xs font-bold text-white leading-relaxed">
-                                  {result?.ai_risk_engine?.final_risk_classification === "Phishing" || result?.ai_risk_engine?.final_risk_classification === "Likely Phishing"
-                                    ? "CRITICAL WARNING: High probability of phishing or credential theft attempt. Do not click links or reply to sender."
-                                    : result?.ai_risk_engine?.final_risk_classification === "Suspicious"
-                                    ? "CAUTION ADVISED: Anomaly detected in message metadata or sender domain alignment. Verify sender through an out-of-band communication channel."
-                                    : "VERIFIED SAFE: Mail headers, sender verification records, and content semantics pass security protocols cleanly."}
-                                </p>
-                              </div>
-
-                              {/* 7. Recommendations */}
-                              <div className="bg-white/5 border border-white/10 p-5 rounded-2xl space-y-2 md:col-span-2">
-                                <span className="text-[9px] font-black uppercase tracking-widest text-orange block border-b border-white/10 pb-2">
-                                  🛡️ Recommendations
-                                </span>
-                                <ul className="space-y-2 text-xs text-white/80 font-medium">
-                                  <li className="flex gap-2 items-center"><ShieldCheck className="w-3.5 h-3.5 text-orange flex-shrink-0" />Verify the sender address against official company domain records.</li>
-                                  <li className="flex gap-2 items-center"><ShieldCheck className="w-3.5 h-3.5 text-orange flex-shrink-0" />Do not enter passwords or sensitive credentials on web pages linked within unverified emails.</li>
-                                  <li className="flex gap-2 items-center"><ShieldCheck className="w-3.5 h-3.5 text-orange flex-shrink-0" />Utilize Mail Verifier AI's interactive chat assistant to inspect specific headers or embedded URLs.</li>
-                                </ul>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Analysis Content Markdown directly below score */}
-                        {result?.summary_markdown && (
-                          <div className="bg-white border border-navy/10 p-6 rounded-[2.5rem] markdown-container text-navy/80 w-full shadow-sm">
-                            <ReactMarkdown
-                              remarkPlugins={[remarkGfm]}
-                              components={{
-                                h3: ({ ...props }) => (
-                                  <h3 className="text-lg font-display font-black uppercase tracking-tight text-orange mb-3 mt-6 first:mt-0 italic flex items-center gap-2 border-b border-navy/5 pb-2" {...props}>
-                                    {props.children}
+                            ) : (
+                              <div className="space-y-6">
+                                <div>
+                                  <h3 className="text-xl font-display font-black uppercase tracking-tight text-[#b81d24] mb-2 italic">
+                                    📧 EMAIL CLASSIFICATION
                                   </h3>
-                                ),
-                                h4: ({ ...props }) => (
-                                  <h4 className="text-xs font-black uppercase tracking-widest text-navy/60 mb-2 mt-4 flex items-center gap-2 before:w-3 before:h-[2px] before:bg-orange" {...props} />
-                                ),
-                                p: ({ ...props }) => <p className="text-xs leading-relaxed mb-3 font-medium text-navy/80" {...props} />,
-                                ul: ({ ...props }) => <ul className="space-y-2 mb-4 list-none p-0" {...props} />,
-                                li: ({ ...props }) => (
-                                  <li className="text-xs flex gap-2.5 text-navy/70 leading-relaxed font-medium">
-                                    <span className="w-1.5 h-1.5 bg-orange rounded-full mt-1.5 flex-shrink-0" />
-                                    <span>{props.children}</span>
-                                  </li>
-                                ),
-                                strong: ({ ...props }) => <strong className="font-black text-navy" {...props} />
-                              }}
-                            >
-                              {result.summary_markdown}
-                            </ReactMarkdown>
+                                  <p className="text-sm md:text-base font-semibold text-navy/90">
+                                    {result?.ai_risk_engine?.final_risk_classification || "Standard Outreach"}
+                                  </p>
+                                </div>
+
+                                <div>
+                                  <h3 className="text-xl font-display font-black uppercase tracking-tight text-[#b81d24] mb-2 italic">
+                                    📊 RISK SCORE
+                                  </h3>
+                                  <p className="text-sm md:text-base font-semibold text-navy/90">
+                                    Likelihood: {result?.ai_risk_engine?.threat_score || 35}% Severity: {(result?.ai_risk_engine?.threat_score || 0) > 60 ? "High" : (result?.ai_risk_engine?.threat_score || 0) > 30 ? "Medium" : "Low"}
+                                  </p>
+                                </div>
+
+                                <div>
+                                  <h3 className="text-xl font-display font-black uppercase tracking-tight text-[#b81d24] mb-3 italic">
+                                    🔍 KEY FINDINGS
+                                  </h3>
+                                  <ul className="space-y-3 text-xs md:text-sm text-navy/80 font-medium">
+                                    <li className="flex gap-3 items-start"><span className="w-2 h-2 rounded-full bg-[#b81d24] mt-2 flex-shrink-0" /><span><strong>Technical Status:</strong> SPF ({String(result?.authentication_analysis?.spf_validation || "PASS")}), DKIM ({String(result?.authentication_analysis?.dkim_validation || "PASS")}), DMARC ({String(result?.authentication_analysis?.dmarc_validation || "PASS")}) authentication passed.</span></li>
+                                    <li className="flex gap-3 items-start"><span className="w-2 h-2 rounded-full bg-[#b81d24] mt-2 flex-shrink-0" /><span><strong>Sender Verification:</strong> Audited sender {formData.senderEmail} ({result?.sender_identity_analysis?.spoofing_detected ? "Spoofing Detected" : "Identity Verified"}).</span></li>
+                                    <li className="flex gap-3 items-start"><span className="w-2 h-2 rounded-full bg-[#b81d24] mt-2 flex-shrink-0" /><span><strong>Header Alignment:</strong> Message delivered to target account with {result?.authentication_analysis?.domain_alignment ? "matching" : "mismatched"} domain record signatures.</span></li>
+                                  </ul>
+                                </div>
+                              </div>
+                            )}
                           </div>
-                        )}
+                        </div>
 
                         {/* Complex Data Grid */}
                         <div className="space-y-6">
