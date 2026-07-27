@@ -147,7 +147,7 @@ You do not access emails yourself. You only analyze structured email data sent t
 GLOBAL RULES - MUST BE STRICTLY ADHERED TO:
 1. NO EMOJIS: Do NOT use any emojis anywhere in your response. No icons, no emoticons. Use clean, plain text and markdown.
 2. STRICTLY FACTUAL: Base your analysis strictly and solely on the actual facts, headers, links, and text content present in the received email. Absolutely no hallucinations, self-generated speculations, or unproved claims.
-3. ESTABLISH UNCERTAINTY: You will be given pre-verified technical data. Do not invent or estimate any technical values yourself — only summarize and explain the verified data you are given. If a specific data point was not provided to you, you must say "Not available" rather than estimating it.
+3. ESTABLISH UNCERTAINTY & ANALYZE CONTENT: You will be given pre-verified technical data. Do not invent technical values (like IPs or DKIM) — use only the verified data provided. However, you MUST deeply analyze the EMAIL BODY content to detect social engineering, urgency tactics, and tone. Do not just output "Safe" statically; provide a unique analysis based on the actual message content.
 4. CONSISTENT & PROFESSIONAL ARRANGEMENT: Ensure a highly structured, objective, analytical, and professional tone. Your outputs must be clean, neat, and formatted perfectly with standard Markdown, avoiding any conversational filler, casual language, or marketing hype.
 5. USER-SAFETY DRIVEN: Focus on objective security risk assessment.
 `;
@@ -1034,7 +1034,10 @@ EMAIL: ${JSON.stringify({ subject: singleData.subject, sender_name: singleData.s
     prompt = `MODE: SINGLE_EMAIL_VIEW
 INPUT: subject, full_body, sender_name, sender_email, reply_to, links, headers.
 VERIFIED_TECHNICAL_DATA: ${JSON.stringify(technicalData)}
-TASK: Perform a complete audit of the email. You will be given pre-verified technical data in VERIFIED_TECHNICAL_DATA. Do not invent or estimate any technical values yourself (like SPF/DKIM, IPs, locations, ISPs, VPNs, or Threat Intel) — only summarize and explain the verified data you are given. If a specific data point was not provided or says "NOT VERIFIED", you MUST output "Not available" or "NOT VERIFIED" rather than estimating it or hallucinating it.
+TASK: Perform a complete, highly accurate audit of the email. You will be given pre-verified technical data in VERIFIED_TECHNICAL_DATA.
+CRITICAL: Do NOT invent, guess, or hallucinate any technical values (like SPF, DKIM, IPs, locations, ISPs, VPNs, or Threat Intel). You MUST ONLY summarize the verified data provided. If a specific data point says "NOT VERIFIED" or is not provided, you MUST output "NOT VERIFIED" for that field. 
+CRITICAL: For the content analysis (urgency tactics, credential theft, typosquatting), you MUST deeply analyze the BODY content and subject of the specific email provided. Do not use static responses. Base your threat and risk scores on actual detected text patterns in the BODY.
+
 Respond ONLY with a valid JSON object matching this schema. NO Markdown formatting blocks around the JSON.
 EMAIL_SUBJECT: ${singleData.subject}
 SENDER_NAME: ${singleData.senderName}
@@ -1043,6 +1046,7 @@ REPLY_TO: ${singleData.replyTo || "N/A"}
 LINKS: ${singleData.links || "N/A"}
 HEADERS: ${singleData.headers || "N/A"}
 BODY: ${singleData.body}
+
 Expected JSON Schema:
 {
   "email_metadata_analysis": {
@@ -1056,16 +1060,16 @@ Expected JSON Schema:
     "received_header_parsed": boolean
   },
   "location_intelligence": {
-    "ip_address": string | null,
-    "country": string | null,
-    "region": string | null,
-    "city": string | null,
-    "isp": string | null,
-    "asn": string | null,
-    "hosting_provider": string | null,
-    "vpn_detected": boolean,
-    "proxy_detected": boolean,
-    "datacenter_detected": boolean
+    "ip_address": string | "NOT VERIFIED",
+    "country": string | "NOT VERIFIED",
+    "region": string | "NOT VERIFIED",
+    "city": string | "NOT VERIFIED",
+    "isp": string | "NOT VERIFIED",
+    "asn": string | "NOT VERIFIED",
+    "hosting_provider": string | "NOT VERIFIED",
+    "vpn_detected": boolean | "NOT VERIFIED",
+    "proxy_detected": boolean | "NOT VERIFIED",
+    "datacenter_detected": boolean | "NOT VERIFIED"
   },
   "sender_identity_analysis": {
     "display_name": string | null,
@@ -1099,13 +1103,13 @@ Expected JSON Schema:
     "blacklist_match": boolean | "NOT VERIFIED"
   },
   "social_engineering_detection": {
-    "urgency_tactics": boolean,
-    "fear_tactics": boolean,
-    "authority_impersonation": boolean,
-    "credential_theft_attempt": boolean,
-    "payment_fraud_attempt": boolean,
-    "invoice_scam": boolean,
-    "bec_detected": boolean
+    "urgency_tactics": boolean | "NOT VERIFIED",
+    "fear_tactics": boolean | "NOT VERIFIED",
+    "authority_impersonation": boolean | "NOT VERIFIED",
+    "credential_theft_attempt": boolean | "NOT VERIFIED",
+    "payment_fraud_attempt": boolean | "NOT VERIFIED",
+    "invoice_scam": boolean | "NOT VERIFIED",
+    "bec_detected": boolean | "NOT VERIFIED"
   },
   "ai_risk_engine": {
     "trust_score": number,

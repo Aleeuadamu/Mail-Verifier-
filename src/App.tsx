@@ -1011,6 +1011,15 @@ export default function App() {
       },
       onCancel: () => {
         setIsProcessingCheckout(false);
+      },
+      onError: (err: any) => {
+        console.error("Paystack Error:", err);
+        setIsProcessingCheckout(false);
+        if (err?.message) {
+          alert(`Payment Error: ${err.message}. If you are in the preview, you may need a valid Paystack public key or to open the app in a new tab.`);
+        } else {
+          alert("Payment could not be initialized. Please check your Paystack API keys.");
+        }
       }
     });
   };
@@ -1169,17 +1178,27 @@ export default function App() {
     }
     const headers = msg.fullData?.payload?.headers || [];
 
-    // Attempt simpler body extraction
-    let bodyData = "";
-    if (msg.fullData?.payload?.parts) {
-      const part =
-        msg.fullData.payload.parts.find(
-          (p: any) => p.mimeType === "text/plain",
-        ) || msg.fullData.payload.parts[0];
-      bodyData = part?.body?.data || "";
-    } else {
-      bodyData = msg.fullData?.payload?.body?.data || "";
-    }
+    // More robust body extraction
+    const extractBody = (payload: any): string => {
+      if (!payload) return "";
+      if (payload.body && payload.body.data) return payload.body.data;
+      if (payload.parts) {
+        for (const part of payload.parts) {
+          if (part.mimeType === "text/plain" && part.body?.data) return part.body.data;
+        }
+        for (const part of payload.parts) {
+          if (part.mimeType === "text/html" && part.body?.data) return part.body.data;
+        }
+        for (const part of payload.parts) {
+          if (part.parts) {
+            const nested = extractBody(part);
+            if (nested) return nested;
+          }
+        }
+      }
+      return "";
+    };
+    let bodyData = extractBody(msg.fullData?.payload);
 
     let decodedBody = msg.snippet;
     try {
@@ -3077,7 +3096,7 @@ export default function App() {
                                   <ul className="space-y-3 text-xs md:text-sm text-navy/80 font-medium">
                                     <li className="flex gap-3 items-start"><span className="w-2 h-2 rounded-full bg-[#b81d24] mt-2 flex-shrink-0" /><span><strong>Technical Status:</strong> SPF ({String(result?.authentication_analysis?.spf_validation || "PASS")}), DKIM ({String(result?.authentication_analysis?.dkim_validation || "PASS")}), DMARC ({String(result?.authentication_analysis?.dmarc_validation || "PASS")}) authentication passed.</span></li>
                                     <li className="flex gap-3 items-start"><span className="w-2 h-2 rounded-full bg-[#b81d24] mt-2 flex-shrink-0" /><span><strong>Sender Verification:</strong> Audited sender {formData.senderEmail} ({result?.sender_identity_analysis?.spoofing_detected ? "Spoofing Detected" : "Identity Verified"}).</span></li>
-                                    <li className="flex gap-3 items-start"><span className="w-2 h-2 rounded-full bg-[#b81d24] mt-2 flex-shrink-0" /><span><strong>Header Alignment:</strong> Message delivered to target account with {result?.authentication_analysis?.domain_alignment ? "matching" : "mismatched"} domain record signatures.</span></li>
+                                    <li className="flex gap-3 items-start"><span className="w-2 h-2 rounded-full bg-[#b81d24] mt-2 flex-shrink-0" /><span><strong>Header Alignment:</strong> Message delivered to target account with {result?.authentication_analysis?.domain_alignment === "NOT VERIFIED" ? "Not Verified" : (result?.authentication_analysis?.domain_alignment ? "matching" : "mismatched")} domain record signatures.</span></li>
                                   </ul>
                                 </div>
 
@@ -3145,7 +3164,7 @@ export default function App() {
                                      <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">SPF</span><span className={cn("text-[10px] uppercase font-black px-2 py-1 rounded-full", String(result?.authentication_analysis?.spf_validation || "").includes("PASS") || String(result?.authentication_analysis?.spf_validation || "").includes("true") || result?.authentication_analysis?.spf_validation === true ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700")}>{String(result?.authentication_analysis?.spf_validation || "N/A")}</span></div>
                                      <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">DKIM</span><span className={cn("text-[10px] uppercase font-black px-2 py-1 rounded-full", String(result?.authentication_analysis?.dkim_validation || "").includes("PASS") || String(result?.authentication_analysis?.dkim_validation || "").includes("true") || result?.authentication_analysis?.dkim_validation === true ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700")}>{String(result?.authentication_analysis?.dkim_validation || "N/A")}</span></div>
                                      <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">DMARC</span><span className={cn("text-[10px] uppercase font-black px-2 py-1 rounded-full", String(result?.authentication_analysis?.dmarc_validation || "").includes("PASS") || String(result?.authentication_analysis?.dmarc_validation || "").includes("true") || result?.authentication_analysis?.dmarc_validation === true ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700")}>{String(result?.authentication_analysis?.dmarc_validation || "N/A")}</span></div>
-                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Domain Align</span><span className={cn("text-[10px] uppercase font-black", result?.authentication_analysis?.domain_alignment ? "text-green-500" : "text-red-500")}>{result?.authentication_analysis?.domain_alignment ? "TRUE" : "FALSE"}</span></div>
+                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Domain Align</span><span className={cn("text-[10px] uppercase font-black", result?.authentication_analysis?.domain_alignment === "NOT VERIFIED" ? "text-orange" : (result?.authentication_analysis?.domain_alignment ? "text-green-500" : "text-red-500"))}>{result?.authentication_analysis?.domain_alignment === "NOT VERIFIED" ? "NOT VERIFIED" : (result?.authentication_analysis?.domain_alignment ? "TRUE" : "FALSE")}</span></div>
                                   </div>
                                </div>
 
@@ -3168,10 +3187,10 @@ export default function App() {
                                     <h4 className="font-black text-xs uppercase tracking-widest">Threat & Social Eng</h4>
                                   </div>
                                   <div className="space-y-3">
-                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Urgency Tech</span><span className={cn("text-[10px] uppercase font-black", result?.social_engineering_detection?.urgency_tactics ? "text-orange" : "text-navy/30")}>{result?.social_engineering_detection?.urgency_tactics ? "DETECTED" : "NONE"}</span></div>
-                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Cred Theft</span><span className={cn("text-[10px] uppercase font-black", result?.social_engineering_detection?.credential_theft_attempt ? "text-red-500" : "text-navy/30")}>{result?.social_engineering_detection?.credential_theft_attempt ? "DETECTED" : "NONE"}</span></div>
+                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Urgency Tech</span><span className={cn("text-[10px] uppercase font-black", result?.social_engineering_detection?.urgency_tactics === "NOT VERIFIED" ? "text-orange" : (result?.social_engineering_detection?.urgency_tactics ? "text-orange" : "text-navy/30"))}>{result?.social_engineering_detection?.urgency_tactics === "NOT VERIFIED" ? "NOT VERIFIED" : (result?.social_engineering_detection?.urgency_tactics ? "DETECTED" : "NONE")}</span></div>
+                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Cred Theft</span><span className={cn("text-[10px] uppercase font-black", result?.social_engineering_detection?.credential_theft_attempt === "NOT VERIFIED" ? "text-orange" : (result?.social_engineering_detection?.credential_theft_attempt ? "text-red-500" : "text-navy/30"))}>{result?.social_engineering_detection?.credential_theft_attempt === "NOT VERIFIED" ? "NOT VERIFIED" : (result?.social_engineering_detection?.credential_theft_attempt ? "DETECTED" : "NONE")}</span></div>
                                      <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Malware Host</span><span className={cn("text-[10px] uppercase font-black", result?.threat_intelligence?.malware_hosting_match === "NOT VERIFIED" ? "text-orange" : (result?.threat_intelligence?.malware_hosting_match ? "text-red-500" : "text-navy/30"))}>{result?.threat_intelligence?.malware_hosting_match === "NOT VERIFIED" ? "NOT VERIFIED" : (result?.threat_intelligence?.malware_hosting_match ? "DETECTED" : "NONE")}</span></div>
-                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Domain Typo</span><span className={cn("text-[10px] uppercase font-black", result?.domain_similarity_detection?.typosquatting_detected ? "text-red-500" : "text-navy/30")}>{result?.domain_similarity_detection?.typosquatting_detected ? "DETECTED" : "NONE"}</span></div>
+                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Domain Typo</span><span className={cn("text-[10px] uppercase font-black", result?.domain_similarity_detection?.typosquatting_detected === "NOT VERIFIED" ? "text-orange" : (result?.domain_similarity_detection?.typosquatting_detected ? "text-red-500" : "text-navy/30"))}>{result?.domain_similarity_detection?.typosquatting_detected === "NOT VERIFIED" ? "NOT VERIFIED" : (result?.domain_similarity_detection?.typosquatting_detected ? "DETECTED" : "NONE")}</span></div>
                                   </div>
                                </div>
                             </div>
