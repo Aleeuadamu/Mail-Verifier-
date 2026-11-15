@@ -1,0 +1,49 @@
+{
+  "users": {},
+  "tokens": {},
+  "reports": {
+    "rep_4gg47lqz0_mv9c5pxq": {
+      "senderDisplayName": "",
+      "senderEmail": "test@scam.example",
+      "subject": "Urgent Test",
+      "dateReceived": "2026-10-15",
+      "emailProvider": "Other",
+      "bodyExcerpt": "",
+      "suspiciousUrls": [],
+      "headers": "",
+      "reasons": [
+        "Phishing or credential theft"
+      ],
+      "userNotes": "",
+      "redFlagsObserved": [],
+      "targetBrand": "",
+      "isAnonymous": false,
+      "status": "pending_review",
+      "id": "rep_4gg47lqz0_mv9c5pxq",
+      "createdAt": "2026-10-15T09:28:00.398Z",
+      "updatedAt": "2026-10-15T09:28:00.398Z"
+    },
+    "rep_qzehptjns_mv9c6sgb": {
+      "senderDisplayName": "",
+      "senderEmail": "phish@attacker.fake",
+      "subject": "Security Alert: Account Compromised",
+      "dateReceived": "2026-10-15",
+      "emailProvider": "Other",
+      "bodyExcerpt": "",
+      "suspiciousUrls": [],
+      "headers": "",
+      "screenshotUrl": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+      "reasons": [
+        "Phishing or credential theft"
+      ],
+      "userNotes": "",
+      "redFlagsObserved": [],
+      "targetBrand": "PayPal",
+      "isAnonymous": false,
+      "status": "pending_review",
+      "id": "rep_qzehptjns_mv9c6sgb",
+      "createdAt": "2026-10-15T09:28:50.315Z",
+      "updatedAt": "2026-10-15T09:28:50.315Z"
+    }
+  }
+}

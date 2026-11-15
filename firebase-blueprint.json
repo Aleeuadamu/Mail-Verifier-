@@ -35,6 +35,90 @@
           }
         }
       }
+    },
+    "CommunityReport": {
+      "title": "CommunityReport",
+      "description": "User submitted email threat report for administrative review and public disclosure",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "senderDisplayName": {
+          "type": "string"
+        },
+        "senderEmail": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "recipientEmail": {
+          "type": "string"
+        },
+        "dateReceived": {
+          "type": "string"
+        },
+        "emailProvider": {
+          "type": "string"
+        },
+        "bodyExcerpt": {
+          "type": "string"
+        },
+        "suspiciousUrls": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "headers": {
+          "type": "string"
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "userNotes": {
+          "type": "string"
+        },
+        "redFlagsObserved": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "targetBrand": {
+          "type": "string"
+        },
+        "isAnonymous": {
+          "type": "boolean"
+        },
+        "submittedByUserId": {
+          "type": "string"
+        },
+        "submittedByUserEmail": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending_review", "approved", "rejected"]
+        },
+        "moderationNotes": {
+          "type": "string"
+        },
+        "reviewedAt": {
+          "type": "string"
+        },
+        "reviewedBy": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        }
+      },
+      "required": ["senderEmail", "subject", "reasons", "status", "createdAt"]
     }
   },
   "firestore": {
@@ -43,6 +127,12 @@
         "$ref": "User"
       },
       "description": "User profiles"
+    },
+    "community_reports/{reportId}": {
+      "schema": {
+        "$ref": "CommunityReport"
+      },
+      "description": "Submitted community email reports"
     }
   }
 }

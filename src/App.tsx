@@ -45,6 +45,11 @@ import {
   Sparkles,
   Zap,
   Clock,
+  FileWarning,
+  CheckCircle2,
+  XCircle,
+  AlertCircle,
+  HelpCircle,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import ReactMarkdown from "react-markdown";
@@ -59,6 +64,8 @@ interface GmailMessage {
   date: string;
   snippet: string;
   fullData: any;
+  labelIds?: string[];
+  fullAnalysis?: any;
   analysis?: {
     classification: string;
     risk_score: number;
@@ -68,6 +75,7 @@ interface GmailMessage {
 }
 
 import AdminDashboard from "./components/AdminDashboard";
+import CommunityReportsView, { ReportFormData } from "./components/CommunityReportsView";
 
 const AppLogo = ({ className = "w-10 h-10" }: { className?: string }) => (
   <svg 
@@ -129,6 +137,9 @@ export default function App() {
     "Finalizing AI audit..."
   ];
   const [result, setResult] = useState<any | null>(null);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [communityMode, setCommunityMode] = useState<"list" | "submit">("list");
+  const [communityPrefillData, setCommunityPrefillData] = useState<Partial<ReportFormData> | undefined>(undefined);
   const [view, setView] = useState<
     | "login"
     | "inbox"
@@ -139,6 +150,7 @@ export default function App() {
     | "insights"
     | "admin"
     | "subscription"
+    | "community_reports"
   >("login");
   const [subscription, setSubscription] = useState<{
     plan: "free" | "pro" | "enterprise" | string;
@@ -425,7 +437,7 @@ export default function App() {
           if (data.type === "THREAT_DETECTED") {
             alert(`Real-time Alert: ${data.message} (${data.classification})`);
             // Refresh inbox automatically to show new mail
-            handleFetchGmail();
+            fetchInbox(user.id);
           }
         } catch (e) {
           console.error("Failed to parse SSE data", e);
@@ -786,15 +798,7 @@ export default function App() {
       
       const { url } = await response.json();
       
-      const authWindow = window.open(
-        url,
-        "gmail_oauth_popup",
-        "width=600,height=700"
-      );
-
-      if (!authWindow) {
-        alert("Please enable popups for this site to establish your secure Google connection.");
-      }
+      window.location.href = url;
     } catch (err: any) {
       console.error("Google Connection Failed:", err);
       setAuthError(err.message || "Google connection failed");
@@ -905,6 +909,57 @@ export default function App() {
     setLoginMode("login");
   };
 
+  const handleReportCurrentEmail = () => {
+    let parsedUrls: string[] = [];
+    if (formData.links) {
+      parsedUrls = formData.links.split(",").map(u => u.trim()).filter(Boolean);
+    }
+    if (parsedUrls.length === 0 && result?.domain_and_link_assessment?.links_analyzed) {
+      parsedUrls = result.domain_and_link_assessment.links_analyzed.map((l: any) => l.url).filter(Boolean);
+    }
+
+    const currentReasons: string[] = [];
+    const threatScore = result?.risk_score ?? result?.ai_risk_engine?.threat_score ?? 0;
+    if (threatScore >= 40) {
+      currentReasons.push("Phishing or credential theft");
+    }
+    if (result?.sender_identity_assessment?.brand_impersonation || result?.brand_impersonation?.detected_brand) {
+      currentReasons.push("Brand impersonation");
+    }
+    if (result?.social_engineering_tactics?.payment_fraud_attempt || result?.social_engineering_tactics?.invoice_scam) {
+      currentReasons.push("Financial fraud or fake invoice");
+    }
+    if (currentReasons.length === 0) {
+      currentReasons.push("Other suspicious activity");
+    }
+
+    const flags: string[] = [];
+    if (result?.red_flags && Array.isArray(result.red_flags)) {
+      result.red_flags.forEach((rf: any) => {
+        if (typeof rf === "string") flags.push(rf);
+        else if (rf.flag) flags.push(rf.flag);
+      });
+    }
+
+    setCommunityPrefillData({
+      senderDisplayName: formData.senderName || "",
+      senderEmail: formData.senderEmail || "",
+      subject: formData.subject || "",
+      recipientEmail: user?.email || "",
+      dateReceived: new Date().toISOString().split("T")[0],
+      emailProvider: user?.email?.toLowerCase().includes("gmail") ? "Gmail" : "Other",
+      bodyExcerpt: formData.body ? formData.body.slice(0, 2000) : "",
+      suspiciousUrls: parsedUrls,
+      headers: formData.headers || "",
+      reasons: currentReasons,
+      redFlagsObserved: flags,
+      targetBrand: result?.sender_identity_assessment?.impersonated_brand || result?.brand_impersonation?.detected_brand || "",
+      isAnonymous: false
+    });
+    setCommunityMode("submit");
+    setView("community_reports");
+  };
+
   const handleAnalyze = async (dataToAnalyze: EmailData) => {
     if (!isPremiumActive()) {
       setShowUpgradePrompt("AI Email Threat Audit");
@@ -916,9 +971,15 @@ export default function App() {
       return;
     }
 
+    setAnalysisError(null);
     setIsAnalyzing(true);
     try {
       const output = await analyzeEmail(dataToAnalyze, "SINGLE_EMAIL_VIEW", user?.id);
+      if (!output) {
+        setAnalysisError("Forensic analysis could not be completed for this message due to a connection or parsing failure. In compliance with strict zero-fabrication rules, no unverified placeholder results are generated.");
+        setResult(null);
+        return;
+      }
       setResult(output);
 
       // Update the inbox feed with the new detailed analysis so it matches the analysis tab
@@ -928,9 +989,9 @@ export default function App() {
             return {
               ...m,
               analysis: {
-                classification: output?.ai_risk_engine?.final_risk_classification || m.analysis?.classification,
-                severity: (output?.ai_risk_engine?.threat_score || 0) > 60 ? "High" : (output?.ai_risk_engine?.threat_score || 0) > 30 ? "Medium" : "Low",
-                risk_score: output?.ai_risk_engine?.threat_score || m.analysis?.risk_score,
+                classification: output?.classification || output?.ai_risk_engine?.final_risk_classification || m.analysis?.classification,
+                severity: output?.severity || ((output?.risk_score || output?.ai_risk_engine?.threat_score || 0) > 60 ? "High" : (output?.risk_score || output?.ai_risk_engine?.threat_score || 0) > 30 ? "Medium" : "Low"),
+                risk_score: output?.risk_score ?? output?.ai_risk_engine?.threat_score ?? m.analysis?.risk_score,
                 short_reason: output?.summary_markdown ? output.summary_markdown.substring(0, 100) : m.analysis?.short_reason
               },
               fullAnalysis: output
@@ -959,8 +1020,9 @@ export default function App() {
           console.warn("Failed to sync updated usage to server:", e);
         }
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error(error);
+      setAnalysisError(error?.message || "Analysis request failed.");
       setResult(null);
     } finally {
       setIsAnalyzing(false);
@@ -971,7 +1033,7 @@ export default function App() {
     setIsProcessingCheckout(true);
     const paystack = new PaystackPop();
     paystack.newTransaction({
-      key: import.meta.env.VITE_PAYSTACK_PUBLIC_KEY || 'pk_test_xxxxxx',
+      key: (import.meta as any).env?.VITE_PAYSTACK_PUBLIC_KEY || 'pk_test_xxxxxx',
       email: user?.email || 'customer@example.com',
       amount: isAnnual ? 65000 * 100 : 6500 * 100,
       currency: "NGN",
@@ -989,7 +1051,7 @@ export default function App() {
               id: transaction.reference,
               date: new Date().toISOString().split("T")[0],
               amount: isAnnual ? "₦65,000" : "₦6,500",
-              status: "Paid"
+              status: "paid" as const
             }
           ]
         };
@@ -1476,6 +1538,35 @@ export default function App() {
                     Insights
                   </span>
                 </button>
+                <button
+                  onClick={() => {
+                    setCommunityMode("list");
+                    setCommunityPrefillData(undefined);
+                    setView("community_reports");
+                  }}
+                  className={cn(
+                    "w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl transition-colors",
+                    view === "community_reports"
+                      ? "bg-navy/5 text-orange font-bold"
+                      : "text-navy hover:bg-navy/5",
+                  )}
+                >
+                  <FileWarning className="w-5 h-5" />
+                  <span className="text-xs font-black uppercase tracking-widest">
+                    Community Reports
+                  </span>
+                </button>
+                <button
+                  onClick={() => {
+                    setCommunityMode("submit");
+                    setCommunityPrefillData(undefined);
+                    setView("community_reports");
+                  }}
+                  className="w-full mt-1.5 flex items-center justify-center gap-2 px-3 py-2 bg-orange/10 hover:bg-orange/20 text-orange border border-orange/20 rounded-xl text-[11px] font-black uppercase tracking-wider transition-all cursor-pointer"
+                >
+                  <FileWarning className="w-3.5 h-3.5" />
+                  <span>Report an Email</span>
+                </button>
               </div>
 
               <div className="space-y-1 pt-2">
@@ -1692,6 +1783,23 @@ export default function App() {
                             >
                               <Globe className="w-4 h-4" />
                               <span>Global Insights</span>
+                            </button>
+                            <button
+                              onClick={() => {
+                                setCommunityMode("list");
+                                setCommunityPrefillData(undefined);
+                                setView("community_reports");
+                                setMobileMenuOpen(false);
+                              }}
+                              className={cn(
+                                "flex items-center gap-3 px-3 py-2.5 rounded-xl text-left text-xs font-bold uppercase tracking-wider transition-colors",
+                                view === "community_reports"
+                                  ? "bg-navy text-orange"
+                                  : "bg-navy/5 text-navy hover:bg-navy/10",
+                              )}
+                            >
+                              <FileWarning className="w-4 h-4" />
+                              <span>Community Reports</span>
                             </button>
                             <button
                               onClick={() => {
@@ -2795,12 +2903,33 @@ export default function App() {
                 exit={{ opacity: 0 }}
                 className="space-y-8"
               >
-                <div className="flex items-center gap-4 text-navy">
+                <div className="flex items-center justify-between gap-4 text-navy w-full">
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => setView("inbox")}
+                      className="p-3 bg-navy/5 hover:bg-navy/10 rounded-2xl text-navy transition-colors cursor-pointer"
+                      title="Back to Messages"
+                    >
+                      <ArrowRight className="w-5 h-5 rotate-180" />
+                    </button>
+                    <div>
+                      <span className="text-[10px] font-black uppercase tracking-widest text-navy/40 block">
+                        Email Inspection & Verification
+                      </span>
+                      <p className="text-xs font-bold text-navy truncate max-w-xs md:max-w-md">
+                        {formData.subject || "Untitled Email"}
+                      </p>
+                    </div>
+                  </div>
+
                   <button
-                    onClick={() => setView("inbox")}
-                    className="p-3 bg-navy/5 rounded-2xl text-navy"
+                    onClick={handleReportCurrentEmail}
+                    className="flex items-center gap-2 px-4 py-2.5 bg-orange hover:bg-orange/90 text-navy font-display font-black text-xs uppercase tracking-wider rounded-2xl shadow-sm transition-all cursor-pointer shrink-0"
+                    title="Submit report with prefilled email evidence"
                   >
-                    <ArrowRight className="w-5 h-5 rotate-180" />
+                    <FileWarning className="w-4 h-4" />
+                    <span className="hidden sm:inline">Report This Email</span>
+                    <span className="sm:hidden">Report</span>
                   </button>
                 </div>
 
@@ -3022,179 +3151,498 @@ export default function App() {
                           </div>
                         </div>
 
-                        {/* Analysis Report Document Container with Top Red Banner */}
-                        <div className="bg-slate-100/80 border border-navy/10 rounded-[2.5rem] overflow-hidden shadow-xl">
-                          {/* Top Red Header Banner (Matching exact user UI screenshot) */}
-                          <div className="bg-[#b81d24] text-white px-8 py-5 flex justify-between items-center border-b border-red-900/20">
-                            <div className="space-y-0.5">
-                              <h2 className="text-sm md:text-base font-display font-black uppercase tracking-wider text-white italic">
-                                {formData.subject
-                                  ? `${formData.subject} ${result?.ai_risk_engine?.final_risk_classification ? `(${result.ai_risk_engine.final_risk_classification.toUpperCase()})` : ''}`
-                                  : (result?.ai_risk_engine?.final_risk_classification || "SECURITY RISK ANALYSIS REPORT").toUpperCase()}
-                              </h2>
+                        {/* Analysis Error / Incomplete Analysis State */}
+                        {analysisError && !result && (
+                          <div className="bg-white border-2 border-dashed border-red-200 rounded-[2.5rem] p-8 md:p-12 text-center space-y-4">
+                            <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto">
+                              <AlertTriangle className="w-8 h-8" />
                             </div>
-                            <div className="text-right shrink-0 ml-4">
-                              <span className="text-[10px] md:text-xs font-black uppercase tracking-widest bg-black/30 px-3 py-1.5 rounded-full text-white/90">
-                                MAGNITUDE: {(result?.ai_risk_engine?.threat_score || 0) > 60 ? "HIGH" : (result?.ai_risk_engine?.threat_score || 0) > 30 ? "MEDIUM" : "LOW"}
-                              </span>
+                            <div className="space-y-2 max-w-md mx-auto">
+                              <h3 className="text-lg font-display font-black uppercase tracking-tight text-navy">
+                                Incomplete Forensic Analysis
+                              </h3>
+                              <p className="text-xs text-navy/60 leading-relaxed font-medium">
+                                {analysisError}
+                              </p>
                             </div>
+                            <button
+                              onClick={() => handleAnalyze(formData)}
+                              className="px-6 py-3 bg-navy text-white rounded-2xl text-xs font-black uppercase tracking-wider hover:bg-navy/90 transition-all cursor-pointer inline-flex items-center gap-2"
+                            >
+                              <RefreshCw className="w-4 h-4" />
+                              Retry Evidence Analysis
+                            </button>
                           </div>
+                        )}
 
-                          {/* Report Body / Markdown Rendering */}
-                          <div className="p-8 space-y-6">
-                            {result?.summary_markdown ? (
-                              <div className="markdown-container text-navy w-full">
-                                <ReactMarkdown
-                                  remarkPlugins={[remarkGfm]}
-                                  components={{
-                                    h3: ({ ...props }) => (
-                                      <h3 className="text-xl md:text-2xl font-display font-black uppercase tracking-tight text-[#b81d24] mb-3 mt-8 first:mt-0 italic flex items-center gap-2" {...props}>
-                                        {props.children}
-                                      </h3>
-                                    ),
-                                    h4: ({ ...props }) => (
-                                      <h4 className="text-sm font-black uppercase tracking-widest text-[#b81d24] mb-2 mt-6 flex items-center gap-2" {...props} />
-                                    ),
-                                    p: ({ ...props }) => <p className="text-sm md:text-base leading-relaxed mb-4 font-semibold text-navy/90" {...props} />,
-                                    ul: ({ ...props }) => <ul className="space-y-3 mb-6 list-none p-0" {...props} />,
-                                    li: ({ ...props }) => (
-                                      <li className="text-xs md:text-sm flex gap-3 text-navy/80 leading-relaxed font-medium">
-                                        <span className="w-2 h-2 rounded-full bg-[#b81d24] mt-2 flex-shrink-0" />
-                                        <span>{props.children}</span>
-                                      </li>
-                                    ),
-                                    strong: ({ ...props }) => <strong className="font-black text-navy" {...props} />
-                                  }}
-                                >
-                                  {result.summary_markdown}
-                                </ReactMarkdown>
+                        {result && (
+                          <>
+                            {/* Analysis Report Document Container with Top Dynamic Severity Banner */}
+                            <div className="bg-slate-100/80 border border-navy/10 rounded-[2.5rem] overflow-hidden shadow-xl">
+                              {/* Top Banner with Dynamic Severity Color */}
+                              <div className={cn(
+                                "text-white px-8 py-5 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b",
+                                (result?.risk_score ?? result?.ai_risk_engine?.threat_score ?? 0) >= 60
+                                  ? "bg-[#b81d24] border-red-900/20"
+                                  : (result?.risk_score ?? result?.ai_risk_engine?.threat_score ?? 0) >= 30
+                                  ? "bg-amber-600 border-amber-700/20"
+                                  : "bg-emerald-600 border-emerald-700/20"
+                              )}>
+                                <div className="space-y-0.5">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-[10px] font-mono font-bold uppercase tracking-wider opacity-90">
+                                      FORENSIC ASSESSMENT REPORT
+                                    </span>
+                                    <span className="px-2 py-0.5 bg-black/20 rounded-md text-[9px] font-mono">
+                                      {result.confidence_level || "HIGH"} CONFIDENCE
+                                    </span>
+                                  </div>
+                                  <h2 className="text-sm md:text-base font-display font-black uppercase tracking-wider text-white italic truncate max-w-md">
+                                    {formData.subject || "MESSAGE SCAN"}
+                                  </h2>
+                                </div>
+                                <div className="flex items-center gap-2 shrink-0">
+                                  <span className="text-[10px] md:text-xs font-black uppercase tracking-widest bg-black/30 px-3 py-1.5 rounded-full text-white/95">
+                                    {result.classification || result?.ai_risk_engine?.final_risk_classification || "AUDITED"} • {result.severity || ((result?.risk_score || 0) > 60 ? "CRITICAL" : (result?.risk_score || 0) > 30 ? "MEDIUM" : "LOW")}
+                                  </span>
+                                  <span className="text-[11px] font-mono font-black bg-white/20 px-3 py-1.5 rounded-full text-white">
+                                    {result?.risk_score ?? result?.ai_risk_engine?.threat_score ?? 0}/100
+                                  </span>
+                                </div>
                               </div>
-                            ) : (
-                              <div className="space-y-6">
-                                <div>
-                                  <h3 className="text-xl font-display font-black uppercase tracking-tight text-[#b81d24] mb-2 italic">
-                                    📧 EMAIL CLASSIFICATION
+
+                              {/* Report Body / Markdown Rendering */}
+                              <div className="p-8 space-y-6">
+                                {result.summary_markdown ? (
+                                  <div className="markdown-container text-navy w-full">
+                                    <ReactMarkdown
+                                      remarkPlugins={[remarkGfm]}
+                                      components={{
+                                        h3: ({ ...props }) => (
+                                          <h3 className="text-xl md:text-2xl font-display font-black uppercase tracking-tight text-[#b81d24] mb-3 mt-8 first:mt-0 italic flex items-center gap-2" {...props}>
+                                            {props.children}
+                                          </h3>
+                                        ),
+                                        h4: ({ ...props }) => (
+                                          <h4 className="text-sm font-black uppercase tracking-widest text-[#b81d24] mb-2 mt-6 flex items-center gap-2" {...props} />
+                                        ),
+                                        p: ({ ...props }) => <p className="text-sm md:text-base leading-relaxed mb-4 font-semibold text-navy/90" {...props} />,
+                                        ul: ({ ...props }) => <ul className="space-y-3 mb-6 list-none p-0" {...props} />,
+                                        li: ({ ...props }) => (
+                                          <li className="text-xs md:text-sm flex gap-3 text-navy/80 leading-relaxed font-medium">
+                                            <span className="w-2 h-2 rounded-full bg-[#b81d24] mt-2 flex-shrink-0" />
+                                            <span>{props.children}</span>
+                                          </li>
+                                        ),
+                                        strong: ({ ...props }) => <strong className="font-black text-navy" {...props} />
+                                      }}
+                                    >
+                                      {result.summary_markdown}
+                                    </ReactMarkdown>
+                                  </div>
+                                ) : (
+                                  <div className="p-6 bg-white rounded-2xl border border-navy/10 space-y-2 text-xs">
+                                    <p className="font-bold text-navy">
+                                      Forensic audit completed based on technical headers and body text.
+                                    </p>
+                                    <p className="text-navy/70">
+                                      Classification: <strong>{result.classification}</strong> (Risk Score: {result.risk_score}/100)
+                                    </p>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* 1. Methodology & Individual Risk Assessment Strip */}
+                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                              {/* Card A: Classification & Severity */}
+                              <div className="bg-white border border-navy/10 p-5 rounded-3xl space-y-2">
+                                <span className="text-[9px] font-black uppercase tracking-widest text-navy/40 block">
+                                  Threat Classification
+                                </span>
+                                <div className="flex items-center gap-2">
+                                  <span className={cn(
+                                    "px-3 py-1 rounded-full text-xs font-black uppercase tracking-wider",
+                                    (result.classification === "Phishing" || result.classification === "Likely Phishing")
+                                      ? "bg-red-100 text-red-700 border border-red-200"
+                                      : result.classification === "Suspicious"
+                                      ? "bg-amber-100 text-amber-800 border border-amber-200"
+                                      : "bg-emerald-100 text-emerald-800 border border-emerald-200"
+                                  )}>
+                                    {result.classification || "Evaluated"}
+                                  </span>
+                                  <span className="text-[10px] font-black uppercase tracking-widest text-navy/50">
+                                    {result.severity || "Low"}
+                                  </span>
+                                </div>
+                              </div>
+
+                              {/* Card B: Rule-Based Risk Score */}
+                              <div className="bg-white border border-navy/10 p-5 rounded-3xl space-y-2">
+                                <div className="flex justify-between items-center">
+                                  <span className="text-[9px] font-black uppercase tracking-widest text-navy/40">
+                                    Calculated Risk Score
+                                  </span>
+                                  <span className="text-sm font-mono font-black text-navy">
+                                    {result.risk_score ?? result?.ai_risk_engine?.threat_score ?? 0} / 100
+                                  </span>
+                                </div>
+                                <div className="w-full h-2 bg-navy/5 rounded-full overflow-hidden">
+                                  <div
+                                    className={cn(
+                                      "h-full rounded-full transition-all duration-500",
+                                      (result.risk_score ?? 0) >= 60 ? "bg-red-600" : (result.risk_score ?? 0) >= 30 ? "bg-amber-500" : "bg-emerald-500"
+                                    )}
+                                    style={{ width: `${Math.min(100, Math.max(5, result.risk_score ?? 10))}%` }}
+                                  />
+                                </div>
+                              </div>
+
+                              {/* Card C: Confidence & Uncertainty */}
+                              <div className="bg-white border border-navy/10 p-5 rounded-3xl space-y-1.5">
+                                <div className="flex justify-between items-center">
+                                  <span className="text-[9px] font-black uppercase tracking-widest text-navy/40">
+                                    Confidence Level
+                                  </span>
+                                  <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-full bg-navy/5 text-navy">
+                                    {result.confidence_level || "High"}
+                                  </span>
+                                </div>
+                                <p className="text-[10px] text-navy/60 leading-tight font-medium line-clamp-2">
+                                  {result.confidence_explanation || "Evidence grounded in available transport headers and raw body text."}
+                                </p>
+                              </div>
+
+                              {/* Card D: Scoring Rules Breakdown */}
+                              <div className="bg-white border border-navy/10 p-5 rounded-3xl space-y-1.5">
+                                <span className="text-[9px] font-black uppercase tracking-widest text-navy/40 block">
+                                  Scoring Methodology
+                                </span>
+                                {result.scoring_breakdown?.rules_applied && result.scoring_breakdown.rules_applied.length > 0 ? (
+                                  <div className="space-y-1 max-h-16 overflow-y-auto pr-1">
+                                    {result.scoring_breakdown.rules_applied.map((rule: string, rIdx: number) => (
+                                      <p key={rIdx} className="text-[9px] font-mono text-navy/70 leading-tight">
+                                        • {rule}
+                                      </p>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <p className="text-[10px] text-navy/50 italic">
+                                    Standard baseline technical evaluation applied.
+                                  </p>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* 2. SPECIFIC RED FLAGS WITH SUPPORTING EVIDENCE QUOTES */}
+                            <div className="bg-white border border-navy/10 p-6 md:p-8 rounded-[2.5rem] space-y-4 shadow-sm">
+                              <div className="flex items-center justify-between pb-3 border-b border-navy/5">
+                                <div className="flex items-center gap-2">
+                                  <ShieldAlert className="w-5 h-5 text-red-600" />
+                                  <h3 className="font-display font-black text-sm md:text-base uppercase tracking-wider text-navy italic">
+                                    Specific Red Flags & Observed Threat Evidence
                                   </h3>
-                                  <p className="text-sm md:text-base font-semibold text-navy/90">
-                                    {result?.ai_risk_engine?.final_risk_classification || "Standard Outreach"}
+                                </div>
+                                <span className="text-[10px] font-mono text-navy/40">
+                                  {(result.red_flags || []).length} Detected
+                                </span>
+                              </div>
+
+                              {result.red_flags && result.red_flags.length > 0 ? (
+                                <div className="space-y-3">
+                                  {result.red_flags.map((rf: any, idx: number) => {
+                                    const flagName = typeof rf === "string" ? rf : rf.flag || rf.title || "Suspicious Indicator";
+                                    const evidence = typeof rf === "object" ? rf.evidence : null;
+                                    const why = typeof rf === "object" ? rf.why_it_matters : null;
+                                    const sev = typeof rf === "object" ? rf.severity : null;
+
+                                    return (
+                                      <div key={idx} className="p-4 bg-red-50/70 border border-red-200/80 rounded-2xl space-y-2">
+                                        <div className="flex items-center justify-between gap-2">
+                                          <div className="flex items-center gap-2">
+                                            <span className="w-2 h-2 rounded-full bg-red-600 shrink-0" />
+                                            <span className="font-bold text-xs text-red-900">{flagName}</span>
+                                          </div>
+                                          {sev && (
+                                            <span className="px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider bg-red-200 text-red-800">
+                                              {sev} Severity
+                                            </span>
+                                          )}
+                                        </div>
+
+                                        {evidence && (
+                                          <div className="bg-white/80 p-2.5 rounded-xl border border-red-200/50 text-[11px] font-mono text-navy/80 space-y-0.5">
+                                            <span className="text-[9px] font-black uppercase tracking-widest text-red-700 block">
+                                              Supporting Evidence Quote:
+                                            </span>
+                                            <p className="italic">"{evidence}"</p>
+                                          </div>
+                                        )}
+
+                                        {why && (
+                                          <p className="text-xs text-red-900/80 font-medium leading-relaxed pl-4">
+                                            <strong className="text-red-950 font-bold">Why it matters:</strong> {why}
+                                          </p>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              ) : (
+                                <div className="p-6 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-center gap-3 text-emerald-900">
+                                  <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                                  <p className="text-xs font-semibold">
+                                    No malicious red flags, deceptive credential harvesting, or extortion tactics were detected in the analyzed text and technical headers.
                                   </p>
                                 </div>
+                              )}
+                            </div>
 
-                                <div>
-                                  <h3 className="text-xl font-display font-black uppercase tracking-tight text-[#b81d24] mb-2 italic">
-                                    📊 RISK SCORE
+                            {/* 3. LEGITIMATE TRUST SIGNALS */}
+                            {result.trust_signals && result.trust_signals.length > 0 && (
+                              <div className="bg-white border border-navy/10 p-6 md:p-8 rounded-[2.5rem] space-y-4 shadow-sm">
+                                <div className="flex items-center gap-2 pb-3 border-b border-navy/5">
+                                  <ShieldCheck className="w-5 h-5 text-emerald-600" />
+                                  <h3 className="font-display font-black text-sm md:text-base uppercase tracking-wider text-navy italic">
+                                    Legitimate Trust Signals & Verified Integrity
                                   </h3>
-                                  <p className="text-sm md:text-base font-semibold text-navy/90">
-                                    Likelihood: {result?.ai_risk_engine?.threat_score || 35}% Severity: {(result?.ai_risk_engine?.threat_score || 0) > 60 ? "High" : (result?.ai_risk_engine?.threat_score || 0) > 30 ? "Medium" : "Low"}
-                                  </p>
                                 </div>
-
-                                <div>
-                                  <h3 className="text-xl font-display font-black uppercase tracking-tight text-[#b81d24] mb-3 italic">
-                                    🔍 KEY FINDINGS
-                                  </h3>
-                                  <ul className="space-y-3 text-xs md:text-sm text-navy/80 font-medium">
-                                    <li className="flex gap-3 items-start"><span className="w-2 h-2 rounded-full bg-[#b81d24] mt-2 flex-shrink-0" /><span><strong>Technical Status:</strong> SPF ({String(result?.authentication_analysis?.spf_validation || "PASS")}), DKIM ({String(result?.authentication_analysis?.dkim_validation || "PASS")}), DMARC ({String(result?.authentication_analysis?.dmarc_validation || "PASS")}) authentication passed.</span></li>
-                                    <li className="flex gap-3 items-start"><span className="w-2 h-2 rounded-full bg-[#b81d24] mt-2 flex-shrink-0" /><span><strong>Sender Verification:</strong> Audited sender {formData.senderEmail} ({result?.sender_identity_analysis?.spoofing_detected ? "Spoofing Detected" : "Identity Verified"}).</span></li>
-                                    <li className="flex gap-3 items-start"><span className="w-2 h-2 rounded-full bg-[#b81d24] mt-2 flex-shrink-0" /><span><strong>Header Alignment:</strong> Message delivered to target account with {result?.authentication_analysis?.domain_alignment === "NOT VERIFIED" ? "Not Verified" : (result?.authentication_analysis?.domain_alignment ? "matching" : "mismatched")} domain record signatures.</span></li>
-                                  </ul>
-                                </div>
-
-                                <div>
-                                  <h3 className="text-xl font-display font-black uppercase tracking-tight text-[#b81d24] mb-3 italic">
-                                    ⚠️ THREAT ANALYSIS
-                                  </h3>
-                                  <p className="text-sm md:text-base font-semibold text-navy/90">
-                                    {result?.sender_identity_analysis?.executive_impersonation
-                                      ? "Executive Impersonation Detected: Domain or display name mimics high-profile authority."
-                                      : "No executive impersonation or malicious link redirect chains detected in message body."}
-                                  </p>
-                                </div>
-
-                                <div>
-                                  <h3 className="text-xl font-display font-black uppercase tracking-tight text-[#b81d24] mb-3 italic">
-                                    ⚖️ FINAL VERDICT
-                                  </h3>
-                                  <p className="text-sm md:text-base font-semibold text-navy/90">
-                                    {(result?.ai_risk_engine?.threat_score || 0) > 60
-                                      ? "HIGH THREAT DETECTED: Exercise extreme caution. Do not click links or share credentials."
-                                      : (result?.ai_risk_engine?.threat_score || 0) > 30
-                                      ? "MODERATE RISK: Verify sender identity via secondary out-of-band communication before taking action."
-                                      : "LOW RISK: Standard email structure with valid authentication protocols."}
-                                  </p>
-                                </div>
-
-                                <div>
-                                  <h3 className="text-xl font-display font-black uppercase tracking-tight text-[#b81d24] mb-3 italic">
-                                    🛡️ RECOMMENDATIONS
-                                  </h3>
-                                  <ul className="space-y-3 text-xs md:text-sm text-navy/80 font-medium">
-                                    <li className="flex gap-3 items-start"><span className="w-2 h-2 rounded-full bg-[#b81d24] mt-2 flex-shrink-0" /><span>Always cross-reference sender domain with known official contact addresses.</span></li>
-                                    <li className="flex gap-3 items-start"><span className="w-2 h-2 rounded-full bg-[#b81d24] mt-2 flex-shrink-0" /><span>Hover over embedded hyperlinks before clicking to verify the underlying destination domain.</span></li>
-                                  </ul>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                  {result.trust_signals.map((ts: any, idx: number) => {
+                                    const sig = typeof ts === "string" ? ts : ts.signal;
+                                    const ev = typeof ts === "object" ? ts.evidence : null;
+                                    return (
+                                      <div key={idx} className="p-4 bg-emerald-50/60 border border-emerald-200/70 rounded-2xl space-y-1">
+                                        <div className="flex items-center gap-2">
+                                          <Check className="w-4 h-4 text-emerald-600 shrink-0 stroke-[3]" />
+                                          <span className="font-bold text-xs text-emerald-950">{sig}</span>
+                                        </div>
+                                        {ev && (
+                                          <p className="text-[11px] text-emerald-900/70 pl-6 font-medium">
+                                            {ev}
+                                          </p>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
                                 </div>
                               </div>
                             )}
-                          </div>
-                        </div>
 
-                        {/* Complex Data Grid */}
-                        <div className="space-y-6">
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                               <div className="bg-white border border-navy/10 p-6 rounded-3xl space-y-4">
-                                  <div className="flex items-center gap-3 pb-3 border-b border-navy/5">
+                            {/* 4. SENDER IDENTITY & DOMAIN/LINK AUDIT */}
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                              {/* SENDER IDENTITY ASSESSMENT */}
+                              <div className="bg-white border border-navy/10 p-6 rounded-[2.5rem] space-y-4 shadow-sm">
+                                <div className="flex items-center gap-3 pb-3 border-b border-navy/5">
+                                  <Fingerprint className="text-orange w-5 h-5"/>
+                                  <h4 className="font-black text-xs uppercase tracking-widest text-navy">
+                                    Sender Identity Assessment
+                                  </h4>
+                                </div>
+                                <div className="space-y-3 text-xs">
+                                  <div className="flex justify-between items-start pb-2 border-b border-navy/5">
+                                    <span className="text-[10px] uppercase font-bold text-navy/50">Claimed Name</span>
+                                    <span className="font-bold text-navy text-right truncate max-w-[200px]">
+                                      {result.sender_identity_assessment?.claimed_name || formData.senderName || "Unknown"}
+                                    </span>
+                                  </div>
+                                  <div className="flex justify-between items-start pb-2 border-b border-navy/5">
+                                    <span className="text-[10px] uppercase font-bold text-navy/50">Actual Email</span>
+                                    <span className="font-mono text-navy text-right truncate max-w-[200px]">
+                                      {result.sender_identity_assessment?.actual_email || formData.senderEmail}
+                                    </span>
+                                  </div>
+                                  <div className="flex justify-between items-center pb-2 border-b border-navy/5">
+                                    <span className="text-[10px] uppercase font-bold text-navy/50">Sender Domain</span>
+                                    <span className="font-mono font-bold text-navy">
+                                      {result.sender_identity_assessment?.domain || formData.senderEmail.split("@")[1] || "N/A"}
+                                    </span>
+                                  </div>
+                                  <div className="flex justify-between items-center pb-2 border-b border-navy/5">
+                                    <span className="text-[10px] uppercase font-bold text-navy/50">Reply-To Mismatch</span>
+                                    <span className={cn("px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider", result.sender_identity_assessment?.name_email_mismatch ? "bg-red-100 text-red-700" : "bg-emerald-100 text-emerald-700")}>
+                                      {result.sender_identity_assessment?.name_email_mismatch ? "MISMATCH DETECTED" : "CONSISTENT"}
+                                    </span>
+                                  </div>
+                                  <div className="flex justify-between items-center">
+                                    <span className="text-[10px] uppercase font-bold text-navy/50">Brand Impersonation</span>
+                                    <span className={cn("px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider", result.sender_identity_assessment?.brand_impersonation ? "bg-red-100 text-red-700" : "bg-emerald-100 text-emerald-700")}>
+                                      {result.sender_identity_assessment?.brand_impersonation ? `DETECTED (${result.sender_identity_assessment?.impersonated_brand || 'Authority'})` : "CLEAN"}
+                                    </span>
+                                  </div>
+                                  {result.sender_identity_assessment?.explanation && (
+                                    <p className="text-[11px] text-navy/70 pt-2 border-t border-navy/5 font-medium leading-relaxed italic">
+                                      "{result.sender_identity_assessment.explanation}"
+                                    </p>
+                                  )}
+                                </div>
+                              </div>
+
+                              {/* DOMAIN & LINK FORENSIC AUDIT */}
+                              <div className="bg-white border border-navy/10 p-6 rounded-[2.5rem] space-y-4 shadow-sm">
+                                <div className="flex items-center justify-between pb-3 border-b border-navy/5">
+                                  <div className="flex items-center gap-3">
                                     <Globe className="text-orange w-5 h-5"/>
-                                    <h4 className="font-black text-xs uppercase tracking-widest">Location Intel</h4>
+                                    <h4 className="font-black text-xs uppercase tracking-widest text-navy">
+                                      Domain & Link Assessment
+                                    </h4>
                                   </div>
-                                  <div className="space-y-3">
-                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">IP Address</span><span className="text-xs font-mono font-bold truncate max-w-[150px]">{result?.location_intelligence?.ip_address || "N/A"}</span></div>
-                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Country</span><span className="text-xs font-mono font-bold truncate max-w-[150px]">{result?.location_intelligence?.country || "N/A"}</span></div>
-                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">City</span><span className="text-xs font-mono font-bold truncate max-w-[150px]">{result?.location_intelligence?.city || "N/A"}</span></div>
-                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">ISP / ASN</span><span className="text-xs font-mono font-bold truncate max-w-[150px]">{result?.location_intelligence?.isp || "N/A"}</span></div>
-                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">VPN / Proxy</span><span className={cn("text-xs font-black uppercase tracking-widest", result?.location_intelligence?.vpn_detected === "NOT VERIFIED" ? "text-orange" : ((result?.location_intelligence?.vpn_detected || result?.location_intelligence?.proxy_detected) ? "text-red-500" : "text-green-500"))}>{result?.location_intelligence?.vpn_detected === "NOT VERIFIED" ? "NOT VERIFIED" : ((result?.location_intelligence?.vpn_detected || result?.location_intelligence?.proxy_detected) ? "DETECTED" : "CLEAN")}</span></div>
-                                  </div>
-                               </div>
+                                  <span className="text-[10px] font-mono text-navy/40">
+                                    {result.domain_and_link_assessment?.links_analyzed?.length || 0} Links
+                                  </span>
+                                </div>
 
-                               <div className="bg-white border border-navy/10 p-6 rounded-3xl space-y-4">
-                                  <div className="flex items-center gap-3 pb-3 border-b border-navy/5">
-                                    <Lock className="text-orange w-5 h-5"/>
-                                    <h4 className="font-black text-xs uppercase tracking-widest">Auth Analysis</h4>
+                                {result.domain_and_link_assessment?.links_analyzed && result.domain_and_link_assessment.links_analyzed.length > 0 ? (
+                                  <div className="space-y-2.5 max-h-56 overflow-y-auto pr-1">
+                                    {result.domain_and_link_assessment.links_analyzed.map((lnk: any, lIdx: number) => (
+                                      <div key={lIdx} className="p-3 bg-navy/[0.02] border border-navy/5 rounded-xl space-y-1 text-xs">
+                                        <div className="flex items-center justify-between gap-2">
+                                          <span className="font-mono font-bold text-navy truncate max-w-[200px]">
+                                            {lnk.domain || lnk.url}
+                                          </span>
+                                          <span className={cn(
+                                            "px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider",
+                                            lnk.risk === "Malicious" ? "bg-red-100 text-red-700" : lnk.risk === "Suspicious" ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"
+                                          )}>
+                                            {lnk.risk || "Audited"}
+                                          </span>
+                                        </div>
+                                        <p className="text-[10px] text-navy/50 font-mono truncate">
+                                          {lnk.url}
+                                        </p>
+                                        {lnk.note && (
+                                          <p className="text-[10px] text-navy/70 font-medium">
+                                            {lnk.note}
+                                          </p>
+                                        )}
+                                      </div>
+                                    ))}
                                   </div>
-                                  <div className="space-y-3">
-                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">SPF</span><span className={cn("text-[10px] uppercase font-black px-2 py-1 rounded-full", String(result?.authentication_analysis?.spf_validation || "").includes("PASS") || String(result?.authentication_analysis?.spf_validation || "").includes("true") || result?.authentication_analysis?.spf_validation === true ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700")}>{String(result?.authentication_analysis?.spf_validation || "N/A")}</span></div>
-                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">DKIM</span><span className={cn("text-[10px] uppercase font-black px-2 py-1 rounded-full", String(result?.authentication_analysis?.dkim_validation || "").includes("PASS") || String(result?.authentication_analysis?.dkim_validation || "").includes("true") || result?.authentication_analysis?.dkim_validation === true ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700")}>{String(result?.authentication_analysis?.dkim_validation || "N/A")}</span></div>
-                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">DMARC</span><span className={cn("text-[10px] uppercase font-black px-2 py-1 rounded-full", String(result?.authentication_analysis?.dmarc_validation || "").includes("PASS") || String(result?.authentication_analysis?.dmarc_validation || "").includes("true") || result?.authentication_analysis?.dmarc_validation === true ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700")}>{String(result?.authentication_analysis?.dmarc_validation || "N/A")}</span></div>
-                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Domain Align</span><span className={cn("text-[10px] uppercase font-black", result?.authentication_analysis?.domain_alignment === "NOT VERIFIED" ? "text-orange" : (result?.authentication_analysis?.domain_alignment ? "text-green-500" : "text-red-500"))}>{result?.authentication_analysis?.domain_alignment === "NOT VERIFIED" ? "NOT VERIFIED" : (result?.authentication_analysis?.domain_alignment ? "TRUE" : "FALSE")}</span></div>
+                                ) : (
+                                  <div className="p-6 bg-navy/[0.02] rounded-2xl text-center space-y-1">
+                                    <p className="text-xs font-bold text-navy">No embedded URLs detected</p>
+                                    <p className="text-[10px] text-navy/50">Message body does not contain external web destinations.</p>
                                   </div>
-                               </div>
-
-                               <div className="bg-white border border-navy/10 p-6 rounded-3xl space-y-4">
-                                  <div className="flex items-center gap-3 pb-3 border-b border-navy/5">
-                                    <Fingerprint className="text-orange w-5 h-5"/>
-                                    <h4 className="font-black text-xs uppercase tracking-widest">Sender Identity</h4>
-                                  </div>
-                                  <div className="space-y-3">
-                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Trust Score</span><span className="text-lg font-black italic">{result?.sender_identity_analysis?.sender_trust_score || "0"}</span></div>
-                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Impersonation</span><span className={cn("text-[10px] uppercase font-black px-2 py-1 rounded-full", (result?.sender_identity_analysis?.executive_impersonation || result?.sender_identity_analysis?.brand_impersonation) ? "bg-red-100 text-red-700" : "bg-green-100 text-green-700")}>{(result?.sender_identity_analysis?.executive_impersonation || result?.sender_identity_analysis?.brand_impersonation) ? "DETECTED" : "CLEAN"}</span></div>
-                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Spoofing</span><span className={cn("text-[10px] uppercase font-black", result?.sender_identity_analysis?.spoofing_detected ? "text-red-500" : "text-green-500")}>{result?.sender_identity_analysis?.spoofing_detected ? "DETECTED" : "CLEAN"}</span></div>
-                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Name/Domain Match</span><span className={cn("text-[10px] uppercase font-black", result?.sender_identity_analysis?.name_domain_mismatch ? "text-red-500" : "text-green-500")}>{result?.sender_identity_analysis?.name_domain_mismatch ? "MISMATCH" : "VERIFIED"}</span></div>
-                                  </div>
-                               </div>
-
-                               <div className="bg-white border border-navy/10 p-6 rounded-3xl space-y-4">
-                                  <div className="flex items-center gap-3 pb-3 border-b border-navy/5">
-                                    <AlertTriangle className="text-orange w-5 h-5"/>
-                                    <h4 className="font-black text-xs uppercase tracking-widest">Threat & Social Eng</h4>
-                                  </div>
-                                  <div className="space-y-3">
-                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Urgency Tech</span><span className={cn("text-[10px] uppercase font-black", result?.social_engineering_detection?.urgency_tactics === "NOT VERIFIED" ? "text-orange" : (result?.social_engineering_detection?.urgency_tactics ? "text-orange" : "text-navy/30"))}>{result?.social_engineering_detection?.urgency_tactics === "NOT VERIFIED" ? "NOT VERIFIED" : (result?.social_engineering_detection?.urgency_tactics ? "DETECTED" : "NONE")}</span></div>
-                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Cred Theft</span><span className={cn("text-[10px] uppercase font-black", result?.social_engineering_detection?.credential_theft_attempt === "NOT VERIFIED" ? "text-orange" : (result?.social_engineering_detection?.credential_theft_attempt ? "text-red-500" : "text-navy/30"))}>{result?.social_engineering_detection?.credential_theft_attempt === "NOT VERIFIED" ? "NOT VERIFIED" : (result?.social_engineering_detection?.credential_theft_attempt ? "DETECTED" : "NONE")}</span></div>
-                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Malware Host</span><span className={cn("text-[10px] uppercase font-black", result?.threat_intelligence?.malware_hosting_match === "NOT VERIFIED" ? "text-orange" : (result?.threat_intelligence?.malware_hosting_match ? "text-red-500" : "text-navy/30"))}>{result?.threat_intelligence?.malware_hosting_match === "NOT VERIFIED" ? "NOT VERIFIED" : (result?.threat_intelligence?.malware_hosting_match ? "DETECTED" : "NONE")}</span></div>
-                                     <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Domain Typo</span><span className={cn("text-[10px] uppercase font-black", result?.domain_similarity_detection?.typosquatting_detected === "NOT VERIFIED" ? "text-orange" : (result?.domain_similarity_detection?.typosquatting_detected ? "text-red-500" : "text-navy/30"))}>{result?.domain_similarity_detection?.typosquatting_detected === "NOT VERIFIED" ? "NOT VERIFIED" : (result?.domain_similarity_detection?.typosquatting_detected ? "DETECTED" : "NONE")}</span></div>
-                                  </div>
-                               </div>
+                                )}
+                              </div>
                             </div>
-                        </div>
+
+                            {/* 5. TECHNICAL AUTHENTICATION & SOCIAL ENGINEERING GRIDS */}
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                              {/* AUTHENTICATION MATRIX */}
+                              <div className="bg-white border border-navy/10 p-6 rounded-[2.5rem] space-y-4 shadow-sm">
+                                <div className="flex items-center gap-3 pb-3 border-b border-navy/5">
+                                  <Lock className="text-orange w-5 h-5"/>
+                                  <h4 className="font-black text-xs uppercase tracking-widest text-navy">
+                                    Cryptographic Authentication
+                                  </h4>
+                                </div>
+                                <div className="space-y-3">
+                                  <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">SPF (Sender Policy Framework)</span><span className={cn("text-[10px] uppercase font-black px-2 py-0.5 rounded-full", String(result?.authentication_results?.spf_record || result?.authentication_analysis?.spf_validation || "").includes("PASS") ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700")}>{String(result?.authentication_results?.spf_record || result?.authentication_analysis?.spf_validation || "N/A")}</span></div>
+                                  <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">DKIM (Cryptographic Signature)</span><span className={cn("text-[10px] uppercase font-black px-2 py-0.5 rounded-full", String(result?.authentication_results?.dkim_signature || result?.authentication_analysis?.dkim_validation || "").includes("PASS") ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700")}>{String(result?.authentication_results?.dkim_signature || result?.authentication_analysis?.dkim_validation || "N/A")}</span></div>
+                                  <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">DMARC Alignment Policy</span><span className={cn("text-[10px] uppercase font-black px-2 py-0.5 rounded-full", String(result?.authentication_results?.dmarc_policy || result?.authentication_analysis?.dmarc_validation || "").includes("PASS") ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700")}>{String(result?.authentication_results?.dmarc_policy || result?.authentication_analysis?.dmarc_validation || "N/A")}</span></div>
+                                  <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">ARC (Authenticated Received Chain)</span><span className="text-[10px] uppercase font-mono font-bold text-navy">{String(result?.authentication_results?.arc_result || "N/A")}</span></div>
+                                  <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Domain Alignment</span><span className={cn("text-[10px] uppercase font-black", result?.authentication_results?.domain_alignment === "NOT VERIFIED" ? "text-orange" : (result?.authentication_results?.domain_alignment ? "text-green-600" : "text-red-600"))}>{result?.authentication_results?.domain_alignment === "NOT VERIFIED" ? "NOT VERIFIED" : (result?.authentication_results?.domain_alignment ? "ALIGNED" : "MISMATCHED")}</span></div>
+                                </div>
+                                <p className="text-[10px] text-navy/50 italic pt-2 border-t border-navy/5 leading-relaxed">
+                                  <strong>Security Note:</strong> Technical authentication validates mail server authorization, but does NOT alone guarantee message safety. Phishing campaigns frequently deploy genuine domains with passing SPF.
+                                </p>
+                              </div>
+
+                              {/* SOCIAL ENGINEERING TACTICS */}
+                              <div className="bg-white border border-navy/10 p-6 rounded-[2.5rem] space-y-4 shadow-sm">
+                                <div className="flex items-center gap-3 pb-3 border-b border-navy/5">
+                                  <AlertTriangle className="text-orange w-5 h-5"/>
+                                  <h4 className="font-black text-xs uppercase tracking-widest text-navy">
+                                    Social Engineering Tactics
+                                  </h4>
+                                </div>
+                                <div className="space-y-3">
+                                  <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Urgency / Deadline Tactics</span><span className={cn("text-[10px] uppercase font-black px-2 py-0.5 rounded-full", result?.social_engineering_tactics?.urgency_tactics ? "bg-red-100 text-red-700" : "bg-navy/5 text-navy/40")}>{result?.social_engineering_tactics?.urgency_tactics ? "DETECTED" : "NONE"}</span></div>
+                                  <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Credential Theft Prompt</span><span className={cn("text-[10px] uppercase font-black px-2 py-0.5 rounded-full", result?.social_engineering_tactics?.credential_theft_attempt ? "bg-red-100 text-red-700" : "bg-navy/5 text-navy/40")}>{result?.social_engineering_tactics?.credential_theft_attempt ? "DETECTED" : "NONE"}</span></div>
+                                  <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Invoice / Financial Pressure</span><span className={cn("text-[10px] uppercase font-black px-2 py-0.5 rounded-full", (result?.social_engineering_tactics?.payment_fraud_attempt || result?.social_engineering_tactics?.invoice_scam) ? "bg-red-100 text-red-700" : "bg-navy/5 text-navy/40")}>{(result?.social_engineering_tactics?.payment_fraud_attempt || result?.social_engineering_tactics?.invoice_scam) ? "DETECTED" : "NONE"}</span></div>
+                                  <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Fear / Intimidation Tactics</span><span className={cn("text-[10px] uppercase font-black px-2 py-0.5 rounded-full", result?.social_engineering_tactics?.fear_tactics ? "bg-red-100 text-red-700" : "bg-navy/5 text-navy/40")}>{result?.social_engineering_tactics?.fear_tactics ? "DETECTED" : "NONE"}</span></div>
+                                  <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Executive / BEC Impersonation</span><span className={cn("text-[10px] uppercase font-black px-2 py-0.5 rounded-full", result?.social_engineering_tactics?.authority_impersonation ? "bg-red-100 text-red-700" : "bg-navy/5 text-navy/40")}>{result?.social_engineering_tactics?.authority_impersonation ? "DETECTED" : "NONE"}</span></div>
+                                </div>
+                                {result?.social_engineering_tactics?.explanation && (
+                                  <p className="text-[11px] text-navy/70 pt-2 border-t border-navy/5 font-medium leading-relaxed italic">
+                                    "{result.social_engineering_tactics.explanation}"
+                                  </p>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* 6. METADATA, NETWORK INTEL & MISSING INFORMATION */}
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                              {/* METADATA & NETWORK INTEL */}
+                              <div className="bg-white border border-navy/10 p-6 rounded-[2.5rem] space-y-4 shadow-sm">
+                                <div className="flex items-center gap-3 pb-3 border-b border-navy/5">
+                                  <Globe className="text-orange w-5 h-5"/>
+                                  <h4 className="font-black text-xs uppercase tracking-widest text-navy">
+                                    Metadata & Network Routing
+                                  </h4>
+                                </div>
+                                <div className="space-y-3 text-xs">
+                                  <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Origin IP Address</span><span className="font-mono text-navy font-bold truncate max-w-[180px]">{result?.metadata_and_network_intelligence?.ip_address || result?.location_intelligence?.ip_address || "Not present in headers"}</span></div>
+                                  <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">Geographic Origin</span><span className="font-bold text-navy">{result?.metadata_and_network_intelligence?.country || result?.location_intelligence?.country || "NOT VERIFIED"}</span></div>
+                                  <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">ISP / ASN</span><span className="font-mono text-navy truncate max-w-[180px]">{result?.metadata_and_network_intelligence?.isp || result?.location_intelligence?.isp || "NOT VERIFIED"}</span></div>
+                                  <div className="flex justify-between items-center"><span className="text-[10px] uppercase font-bold text-navy/50">VPN / Datacenter Node</span><span className="font-mono font-bold text-navy">{result?.metadata_and_network_intelligence?.vpn_detected || "CLEAN"}</span></div>
+                                </div>
+                              </div>
+
+                              {/* MISSING & INCONCLUSIVE INFORMATION */}
+                              <div className="bg-white border border-navy/10 p-6 rounded-[2.5rem] space-y-4 shadow-sm">
+                                <div className="flex items-center gap-3 pb-3 border-b border-navy/5">
+                                  <HelpCircle className="text-navy/40 w-5 h-5"/>
+                                  <h4 className="font-black text-xs uppercase tracking-widest text-navy">
+                                    Missing & Inconclusive Information
+                                  </h4>
+                                </div>
+                                <div className="space-y-2">
+                                  {result.missing_information && result.missing_information.length > 0 ? (
+                                    result.missing_information.map((item: string, mIdx: number) => (
+                                      <div key={mIdx} className="flex items-start gap-2 text-xs text-navy/70 font-medium">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-navy/30 mt-1.5 shrink-0" />
+                                        <span>{item}</span>
+                                      </div>
+                                    ))
+                                  ) : (
+                                    <p className="text-xs text-navy/50 italic">
+                                      All required transport headers and content streams were available for audit.
+                                    </p>
+                                  )}
+                                </div>
+                                <p className="text-[10px] text-navy/40 italic pt-2 border-t border-navy/5">
+                                  Integrity Standard: Mail Verifier never invents WHOIS ages, uncalled sandbox matches, or routing logs when unavailable.
+                                </p>
+                              </div>
+                            </div>
+
+                            {/* 7. RECOMMENDED USER ACTION & COMMUNITY REPORT CTA */}
+                            <div className="bg-gradient-to-r from-navy via-navy to-navy/95 text-white p-6 md:p-8 rounded-[2.5rem] shadow-xl border border-navy/10 flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
+                              <div className="space-y-2 max-w-xl">
+                                <span className="text-[10px] font-black uppercase tracking-widest text-orange flex items-center gap-1.5">
+                                  <Shield className="w-3.5 h-3.5" />
+                                  Recommended Recipient Action
+                                </span>
+                                <h3 className="text-lg md:text-xl font-display font-black uppercase italic tracking-tight text-white">
+                                  {result.recommended_action || "Treat this message with standard caution. Never enter sensitive passwords on untrusted third-party sites."}
+                                </h3>
+                                <p className="text-xs text-white/70 font-medium leading-relaxed">
+                                  Help protect the entire community by reporting confirmed fraudulent or impersonating emails to the public threat register.
+                                </p>
+                              </div>
+
+                              <button
+                                onClick={handleReportCurrentEmail}
+                                className="px-6 py-3.5 bg-orange hover:bg-orange/90 text-navy font-display font-black text-xs uppercase tracking-wider rounded-2xl shadow-lg transition-all flex items-center gap-2 cursor-pointer shrink-0"
+                              >
+                                <FileWarning className="w-4 h-4" />
+                                <span>Report This Email</span>
+                              </button>
+                            </div>
+                          </>
+                        )}
                       </div>
                     )}
 
@@ -3983,6 +4431,16 @@ export default function App() {
               </motion.div>
             )}
 
+            {view === "community_reports" && (
+              <CommunityReportsView
+                initialMode={communityMode}
+                prefillData={communityPrefillData}
+                currentUserEmail={user?.email}
+                currentUserId={user?.id}
+                onNavigateBack={() => setView("inbox")}
+              />
+            )}
+
             {view === "admin" && user?.isAdmin && (
               <AdminDashboard />
             )}
@@ -3991,7 +4449,7 @@ export default function App() {
 
         {/* Persistent Bottom Nav (Mobile/Web App style) */}
         {view !== "login" && (
-          <nav className="fixed bottom-0 left-0 right-0 z-50 bg-white/80 backdrop-blur-2xl border-t border-navy/10 px-6 pb-6 pt-3 md:hidden">
+          <nav className="fixed bottom-0 left-0 right-0 z-50 bg-white/80 backdrop-blur-2xl border-t border-navy/10 px-4 pb-6 pt-3 md:hidden">
             <div className="max-w-xl mx-auto flex justify-between items-center">
               <button
                 onClick={() => {
@@ -4022,6 +4480,23 @@ export default function App() {
                 <ShieldAlert className="w-6 h-6" />
                 <span className="text-[8px] font-black uppercase tracking-widest">
                   Alerts
+                </span>
+              </button>
+
+              <button
+                onClick={() => {
+                  setCommunityMode("list");
+                  setCommunityPrefillData(undefined);
+                  setView("community_reports");
+                }}
+                className={cn(
+                  "flex flex-col items-center gap-1",
+                  view === "community_reports" ? "text-orange" : "text-navy/40",
+                )}
+              >
+                <FileWarning className="w-6 h-6" />
+                <span className="text-[8px] font-black uppercase tracking-widest">
+                  Reports
                 </span>
               </button>
 

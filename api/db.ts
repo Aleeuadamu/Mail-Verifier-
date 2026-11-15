@@ -79,10 +79,54 @@ export interface User {
   subscription: Subscription;
   createdAt: string;
   isAdmin?: boolean;
+  isSuperAdmin?: boolean;
   isVerified?: boolean;
   verificationToken?: string;
   failedLoginAttempts?: number;
   lockedUntil?: string | null;
+}
+
+export interface ReportAppeal {
+  appellantName: string;
+  appellantEmail: string;
+  appellantRole: string; // e.g. "Domain Owner", "Authorized Sender", "IT Administrator", "Legal Representative"
+  reason: string;
+  explanation: string;
+  evidenceLinksOrText?: string;
+  status: "pending" | "approved" | "rejected";
+  submittedAt: string;
+  reviewedAt?: string;
+  reviewedBy?: string;
+  reviewNotes?: string;
+}
+
+export interface CommunityReport {
+  id: string;
+  senderDisplayName: string;
+  senderEmail: string;
+  subject: string;
+  recipientEmail?: string;
+  dateReceived?: string;
+  emailProvider?: string;
+  bodyExcerpt?: string;
+  suspiciousUrls?: string[];
+  headers?: string;
+  screenshotUrl?: string;
+  reasons: string[];
+  userNotes?: string;
+  redFlagsObserved?: string[];
+  targetBrand?: string;
+  isAnonymous?: boolean;
+  submittedByUserId?: string;
+  submittedByUserEmail?: string;
+  status: "pending_review" | "approved" | "rejected";
+  moderationNotes?: string;
+  reviewedAt?: string;
+  reviewedBy?: string;
+  hasAppeal?: boolean;
+  appeal?: ReportAppeal;
+  createdAt: string;
+  updatedAt?: string;
 }
 
 const DB_FILE = path.join(process.cwd(), "db.json");
@@ -95,7 +139,7 @@ function readLocalDb(): any {
   } catch (err) {
     console.error("Failed to read local DB:", err);
   }
-  return { users: {}, tokens: {} };
+  return { users: {}, tokens: {}, reports: {} };
 }
 
 function writeLocalDb(data: any) {
@@ -208,6 +252,46 @@ const localDb = {
     if (data.tokens && data.tokens[id]) {
       delete data.tokens[id];
     }
+    writeLocalDb(data);
+    return true;
+  },
+
+  getReportById(id: string): CommunityReport | null {
+    const data = readLocalDb();
+    if (!data.reports) return null;
+    return data.reports[id] || null;
+  },
+
+  createReport(report: CommunityReport): CommunityReport {
+    const data = readLocalDb();
+    if (!data.reports) data.reports = {};
+    data.reports[report.id] = report;
+    writeLocalDb(data);
+    return report;
+  },
+
+  getAllReports(): CommunityReport[] {
+    const data = readLocalDb();
+    if (!data.reports) return [];
+    return Object.values(data.reports);
+  },
+
+  updateReport(id: string, updates: Partial<CommunityReport>): CommunityReport | null {
+    const data = readLocalDb();
+    if (!data.reports || !data.reports[id]) return null;
+    data.reports[id] = {
+      ...data.reports[id],
+      ...updates,
+      updatedAt: new Date().toISOString()
+    };
+    writeLocalDb(data);
+    return data.reports[id];
+  },
+
+  deleteReport(id: string): boolean {
+    const data = readLocalDb();
+    if (!data.reports || !data.reports[id]) return false;
+    delete data.reports[id];
     writeLocalDb(data);
     return true;
   }
@@ -372,6 +456,120 @@ export const dbService = {
     } catch (e: any) {
       handleDbFallback("deleteUser", e);
       return localDb.deleteUser(id);
+    }
+  },
+
+  async createReport(reportData: Omit<CommunityReport, "id" | "createdAt" | "status"> & { id?: string; status?: "pending_review" | "approved" | "rejected"; createdAt?: string }): Promise<CommunityReport> {
+    const id = reportData.id || "rep_" + Math.random().toString(36).substring(2, 11) + "_" + Date.now().toString(36);
+    const newReport: CommunityReport = {
+      ...reportData,
+      id,
+      status: reportData.status || "pending_review",
+      createdAt: reportData.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    if (!db) {
+      return localDb.createReport(newReport);
+    }
+    try {
+      await db.collection("community_reports").doc(id).set(newReport);
+      return newReport;
+    } catch (e: any) {
+      handleDbFallback("createReport", e);
+      return localDb.createReport(newReport);
+    }
+  },
+
+  async getReportById(id: string): Promise<CommunityReport | null> {
+    if (!db) {
+      return localDb.getReportById(id);
+    }
+    try {
+      const doc = await db.collection("community_reports").doc(id).get();
+      if (!doc.exists) return null;
+      return doc.data() as CommunityReport;
+    } catch (e: any) {
+      handleDbFallback("getReportById", e);
+      return localDb.getReportById(id);
+    }
+  },
+
+  async getAllReports(): Promise<CommunityReport[]> {
+    if (!db) {
+      return localDb.getAllReports().sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    }
+    try {
+      const snapshot = await db.collection("community_reports").get();
+      const reports = snapshot.docs.map(doc => doc.data() as CommunityReport);
+      return reports.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    } catch (e: any) {
+      handleDbFallback("getAllReports", e);
+      return localDb.getAllReports().sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    }
+  },
+
+  async getPublicReports(searchQuery?: string, category?: string): Promise<CommunityReport[]> {
+    let reports = await this.getAllReports();
+    // NEVER automatically publish user submitted reports: only approved reports are publicly visible
+    reports = reports.filter(r => r.status === "approved");
+
+    if (category && category !== "all") {
+      const catLower = category.toLowerCase();
+      reports = reports.filter(r => 
+        r.reasons?.some(re => re.toLowerCase().includes(catLower)) ||
+        (r.targetBrand && r.targetBrand.toLowerCase().includes(catLower))
+      );
+    }
+
+    if (searchQuery && searchQuery.trim()) {
+      const q = searchQuery.toLowerCase().trim();
+      reports = reports.filter(r => 
+        (r.senderEmail && r.senderEmail.toLowerCase().includes(q)) ||
+        (r.senderDisplayName && r.senderDisplayName.toLowerCase().includes(q)) ||
+        (r.subject && r.subject.toLowerCase().includes(q)) ||
+        (r.targetBrand && r.targetBrand.toLowerCase().includes(q)) ||
+        (r.bodyExcerpt && r.bodyExcerpt.toLowerCase().includes(q)) ||
+        (r.suspiciousUrls && r.suspiciousUrls.some(u => u.toLowerCase().includes(q)))
+      );
+    }
+
+    return reports;
+  },
+
+  async updateReport(id: string, updates: Partial<CommunityReport>): Promise<CommunityReport | null> {
+    if (!db) {
+      return localDb.updateReport(id, updates);
+    }
+    try {
+      const docRef = db.collection("community_reports").doc(id);
+      const doc = await docRef.get();
+      if (!doc.exists) return null;
+      const updated = {
+        ...doc.data(),
+        ...updates,
+        updatedAt: new Date().toISOString()
+      } as CommunityReport;
+      await docRef.set(updated);
+      return updated;
+    } catch (e: any) {
+      handleDbFallback("updateReport", e);
+      return localDb.updateReport(id, updates);
+    }
+  },
+
+  async deleteReport(id: string): Promise<boolean> {
+    if (!db) {
+      return localDb.deleteReport(id);
+    }
+    try {
+      const docRef = db.collection("community_reports").doc(id);
+      const doc = await docRef.get();
+      if (!doc.exists) return false;
+      await docRef.delete();
+      return true;
+    } catch (e: any) {
+      handleDbFallback("deleteReport", e);
+      return localDb.deleteReport(id);
     }
   }
 };
