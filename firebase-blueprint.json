@@ -33,8 +33,31 @@
               }
             }
           }
+        },
+        "isAdmin": {
+          "type": "boolean"
+        },
+        "isSuperAdmin": {
+          "type": "boolean"
         }
       }
+    },
+    "AdminInvite": {
+      "title": "AdminInvite",
+      "description": "Email address invited/granted admin privileges by Super Admin",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string"
+        },
+        "addedBy": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        }
+      },
+      "required": ["email", "addedBy", "createdAt"]
     },
     "CommunityReport": {
       "title": "CommunityReport",
@@ -72,6 +95,9 @@
           }
         },
         "headers": {
+          "type": "string"
+        },
+        "screenshotUrl": {
           "type": "string"
         },
         "reasons": {
@@ -114,6 +140,29 @@
         "reviewedBy": {
           "type": "string"
         },
+        "hasAppeal": {
+          "type": "boolean"
+        },
+        "appeal": {
+          "type": "object",
+          "properties": {
+            "appellantName": { "type": "string" },
+            "appellantEmail": { "type": "string" },
+            "appellantRole": { "type": "string" },
+            "reason": { "type": "string" },
+            "explanation": { "type": "string" },
+            "evidenceLinksOrText": { "type": "string" },
+            "isVerifiedSenderMatch": { "type": "boolean" },
+            "status": {
+              "type": "string",
+              "enum": ["pending", "approved", "rejected"]
+            },
+            "submittedAt": { "type": "string" },
+            "reviewedBy": { "type": "string" },
+            "reviewedAt": { "type": "string" },
+            "reviewNotes": { "type": "string" }
+          }
+        },
         "createdAt": {
           "type": "string"
         }
@@ -127,6 +176,12 @@
         "$ref": "User"
       },
       "description": "User profiles"
+    },
+    "admin_invites/{email}": {
+      "schema": {
+        "$ref": "AdminInvite"
+      },
+      "description": "Pending admin email grants"
     },
     "community_reports/{reportId}": {
       "schema": {

@@ -94,7 +94,7 @@ const AppLogo = ({ className = "w-10 h-10" }: { className?: string }) => (
 );
 
 export default function App() {
-  const [user, setUser] = useState<{ email: string; name: string; id: string; isAdmin?: boolean } | null>(
+  const [user, setUser] = useState<{ email: string; name: string; id: string; isAdmin?: boolean; isSuperAdmin?: boolean } | null>(
     null,
   );
   const [inbox, setInbox] = useState<GmailMessage[]>([]);
@@ -139,7 +139,14 @@ export default function App() {
   const [result, setResult] = useState<any | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [communityMode, setCommunityMode] = useState<"list" | "submit">("list");
+  const [communitySearchQuery, setCommunitySearchQuery] = useState("");
   const [communityPrefillData, setCommunityPrefillData] = useState<Partial<ReportFormData> | undefined>(undefined);
+  const [reportedSendersMap, setReportedSendersMap] = useState<Record<string, number>>({});
+  const [senderCommunityWarning, setSenderCommunityWarning] = useState<{
+    reported: boolean;
+    count: number;
+    reports: any[];
+  } | null>(null);
   const [view, setView] = useState<
     | "login"
     | "inbox"
@@ -461,9 +468,11 @@ export default function App() {
               email: data.user.email,
               name: data.user.name,
               id: data.user.id,
-              isAdmin: data.user.isAdmin
+              isAdmin: data.user.isAdmin,
+              isSuperAdmin: data.user.isSuperAdmin
             });
             setView("inbox");
+            fetchPublicReportedSenders();
             setSubscription(data.user.subscription || {
               plan: "free",
               usage: 8,
@@ -529,7 +538,8 @@ export default function App() {
             email: loggedInUser.email,
             name: loggedInUser.name,
             id: loggedInUser.id,
-            isAdmin: loggedInUser.isAdmin
+            isAdmin: loggedInUser.isAdmin,
+            isSuperAdmin: loggedInUser.isSuperAdmin
           });
           setSubscription(loggedInUser.subscription || {
             plan: "free",
@@ -540,6 +550,7 @@ export default function App() {
             invoices: []
           });
           setView("inbox");
+          fetchPublicReportedSenders();
         }
         setIsGmailConnected(true);
         fetchInbox(uid);
@@ -549,6 +560,50 @@ export default function App() {
     window.addEventListener("message", handleOAuthMessage);
     return () => window.removeEventListener("message", handleOAuthMessage);
   }, []);
+
+  const fetchPublicReportedSenders = async () => {
+    try {
+      const res = await fetch("/api/reports/public");
+      if (res.ok) {
+        const data = await res.json();
+        const counts: Record<string, number> = {};
+        for (const rep of data.reports || []) {
+          const emailKey = rep.senderEmail?.toLowerCase().trim();
+          if (emailKey) {
+            counts[emailKey] = (counts[emailKey] || 0) + 1;
+          }
+        }
+        setReportedSendersMap(counts);
+      }
+    } catch (e) {
+      console.warn("Could not refresh public reported senders", e);
+    }
+  };
+
+  const checkSenderCommunityReport = async (senderEmail?: string) => {
+    const clean = senderEmail?.toLowerCase().trim();
+    if (!clean) {
+      setSenderCommunityWarning(null);
+      return;
+    }
+    try {
+      const res = await fetch(`/api/reports/check?email=${encodeURIComponent(clean)}`);
+      if (res.ok) {
+        const data = await res.json();
+        setSenderCommunityWarning(data);
+      } else {
+        setSenderCommunityWarning(null);
+      }
+    } catch {
+      setSenderCommunityWarning(null);
+    }
+  };
+
+  useEffect(() => {
+    if (view === "inbox" && user) {
+      fetchPublicReportedSenders();
+    }
+  }, [view]);
 
   const fetchRemainingPages = async (
     sessionId: number,
@@ -841,7 +896,8 @@ export default function App() {
         email: loggedInUser.email,
         name: loggedInUser.name,
         id: loggedInUser.id,
-        isAdmin: loggedInUser.isAdmin
+        isAdmin: loggedInUser.isAdmin,
+        isSuperAdmin: loggedInUser.isSuperAdmin
       });
       setView("inbox");
       setSubscription(loggedInUser.subscription || {
@@ -852,6 +908,7 @@ export default function App() {
         trialStartDate: new Date().toISOString(),
         invoices: []
       });
+      fetchPublicReportedSenders();
       fetchInbox(loggedInUser.id);
     } catch (err: any) {
       setAuthError(err.message || "Login failed");
@@ -881,23 +938,31 @@ export default function App() {
         throw new Error(errorData.error || "User signup failed");
       }
 
-      const { user: registeredUser } = await response.json();
-      setUser({
-        email: registeredUser.email,
-        name: registeredUser.name,
-        id: registeredUser.id,
-        isAdmin: registeredUser.isAdmin
-      });
-      setView("inbox");
-      setSubscription(registeredUser.subscription || {
-        plan: "free",
-        usage: 8,
-        paymentMethod: "None",
-        currentPeriodEnd: null,
-        trialStartDate: new Date().toISOString(),
-        invoices: []
-      });
-      fetchInbox(registeredUser.id);
+      const regJson = await response.json();
+      const registeredUser = regJson.user;
+      if (registeredUser) {
+        setUser({
+          email: registeredUser.email,
+          name: registeredUser.name,
+          id: registeredUser.id,
+          isAdmin: registeredUser.isAdmin,
+          isSuperAdmin: registeredUser.isSuperAdmin
+        });
+        setView("inbox");
+        setSubscription(registeredUser.subscription || {
+          plan: "free",
+          usage: 8,
+          paymentMethod: "None",
+          currentPeriodEnd: null,
+          trialStartDate: new Date().toISOString(),
+          invoices: []
+        });
+        fetchPublicReportedSenders();
+        fetchInbox(registeredUser.id);
+      } else {
+        setAuthError(regJson.message || "Account created! Please verify your email before logging in.");
+        setLoginMode("login");
+      }
     } catch (err: any) {
       setAuthError(err.message || "Signup failed");
     }
@@ -1294,6 +1359,8 @@ export default function App() {
       },
     ]);
     setFormData(analysisData);
+    setSenderCommunityWarning(null);
+    checkSenderCommunityReport(analysisData.senderEmail);
     if ((msg as any).fullAnalysis) {
       setResult((msg as any).fullAnalysis);
       setResultTab("analysis");
@@ -1541,6 +1608,7 @@ export default function App() {
                 <button
                   onClick={() => {
                     setCommunityMode("list");
+                    setCommunitySearchQuery("");
                     setCommunityPrefillData(undefined);
                     setView("community_reports");
                   }}
@@ -1559,6 +1627,7 @@ export default function App() {
                 <button
                   onClick={() => {
                     setCommunityMode("submit");
+                    setCommunitySearchQuery("");
                     setCommunityPrefillData(undefined);
                     setView("community_reports");
                   }}
@@ -1600,7 +1669,7 @@ export default function App() {
                   </span>
                 </button>
 
-                {user?.isAdmin && (
+                {(user?.isAdmin || user?.isSuperAdmin || user?.email?.toLowerCase().trim() === "adamu0533@gmail.com") && (
                   <button
                     onClick={() => setView("admin")}
                     className={cn(
@@ -1612,7 +1681,7 @@ export default function App() {
                   >
                     <Shield className="w-5 h-5" />
                     <span className="text-xs font-black uppercase tracking-widest">
-                      Admin
+                      Admin Dashboard
                     </span>
                   </button>
                 )}
@@ -1787,6 +1856,7 @@ export default function App() {
                             <button
                               onClick={() => {
                                 setCommunityMode("list");
+                                setCommunitySearchQuery("");
                                 setCommunityPrefillData(undefined);
                                 setView("community_reports");
                                 setMobileMenuOpen(false);
@@ -1832,7 +1902,7 @@ export default function App() {
                               <span>Account Settings</span>
                             </button>
 
-                            {user?.isAdmin && (
+                            {(user?.isAdmin || user?.isSuperAdmin || user?.email?.toLowerCase().trim() === "adamu0533@gmail.com") && (
                               <button
                                 onClick={() => {
                                   setView("admin");
@@ -2552,7 +2622,7 @@ export default function App() {
                         className="bg-navy/[0.03] p-5 rounded-3xl border border-navy/10 cursor-pointer hover:bg-navy/5 transition-colors group"
                       >
                         <div className="flex justify-between items-start mb-2">
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
                             {msg.analysis && (
                               <div
                                 className={cn(
@@ -2564,6 +2634,17 @@ export default function App() {
                             <span className="text-[10px] font-black uppercase tracking-widest text-orange truncate max-w-[200px]">
                               {msg.from.split("<")[0].trim()}
                             </span>
+                            {(() => {
+                              const senderAddr = (msg.from.match(/<(.+)>/)?.[1] || msg.from).toLowerCase().trim();
+                              const count = reportedSendersMap[senderAddr];
+                              if (!count) return null;
+                              return (
+                                <span className="px-2 py-0.5 rounded-full text-[8px] font-black uppercase tracking-widest bg-red-100 text-red-700 border border-red-200 flex items-center gap-1">
+                                  <FileWarning className="w-2.5 h-2.5" />
+                                  Community Reported ({count})
+                                </span>
+                              );
+                            })()}
                           </div>
                           <div className="flex flex-col items-end text-right">
                             <span className="text-[9px] font-mono text-navy/40">
@@ -2932,6 +3013,43 @@ export default function App() {
                     <span className="sm:hidden">Report</span>
                   </button>
                 </div>
+
+                {/* Public Community Reported Email Warning Banner */}
+                {senderCommunityWarning?.reported && (
+                  <div className="p-5 bg-red-50 border-2 border-red-300 rounded-3xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm animate-in fade-in">
+                    <div className="flex items-start gap-3">
+                      <div className="p-2.5 bg-red-600 text-white rounded-2xl shrink-0">
+                        <ShieldAlert className="w-5 h-5" />
+                      </div>
+                      <div className="space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-xs font-black uppercase tracking-wider text-red-900">
+                            Community Threat Warning: Reported Sender
+                          </span>
+                          <span className="px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest bg-red-600 text-white">
+                            {senderCommunityWarning.count} Admin-Verified Report{senderCommunityWarning.count > 1 ? "s" : ""}
+                          </span>
+                        </div>
+                        <p className="text-xs text-red-800 font-medium leading-relaxed">
+                          The sender address <span className="font-mono font-bold">{formData.senderEmail}</span> has been reported by community users and verified by Mail Verifier administrators. Exercise extreme caution before trusting links or requests.
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCommunityMode("list");
+                        setCommunitySearchQuery(formData.senderEmail || "");
+                        setCommunityPrefillData(undefined);
+                        setView("community_reports");
+                      }}
+                      className="self-start sm:self-center px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-2xl text-xs font-black uppercase tracking-wider flex items-center gap-1.5 cursor-pointer shrink-0 shadow-sm"
+                    >
+                      <Eye className="w-4 h-4" />
+                      <span>View Public Report</span>
+                    </button>
+                  </div>
+                )}
 
                 {isAnalyzing && !result ? (
                   <div className="py-20 flex flex-col items-center gap-6">
@@ -4434,6 +4552,7 @@ export default function App() {
             {view === "community_reports" && (
               <CommunityReportsView
                 initialMode={communityMode}
+                initialSearchQuery={communitySearchQuery}
                 prefillData={communityPrefillData}
                 currentUserEmail={user?.email}
                 currentUserId={user?.id}
@@ -4441,8 +4560,8 @@ export default function App() {
               />
             )}
 
-            {view === "admin" && user?.isAdmin && (
-              <AdminDashboard />
+            {view === "admin" && (user?.isAdmin || user?.isSuperAdmin || user?.email?.toLowerCase().trim() === "adamu0533@gmail.com") && (
+              <AdminDashboard currentUser={user} />
             )}
           </AnimatePresence>
         </main>
@@ -4486,6 +4605,7 @@ export default function App() {
               <button
                 onClick={() => {
                   setCommunityMode("list");
+                  setCommunitySearchQuery("");
                   setCommunityPrefillData(undefined);
                   setView("community_reports");
                 }}

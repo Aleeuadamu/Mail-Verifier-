@@ -29,8 +29,18 @@ import {
   X,
   Trash2,
   AlertCircle,
-  RefreshCw
+  RefreshCw,
+  Scale,
+  Mail
 } from "lucide-react";
+
+export interface PublicAppealSummary {
+  status: "pending" | "approved" | "rejected";
+  reason: string;
+  submittedAt: string;
+  reviewedAt?: string;
+  reviewNotes?: string;
+}
 
 export interface CommunityReport {
   id: string;
@@ -55,6 +65,8 @@ export interface CommunityReport {
   moderationNotes?: string;
   reviewedAt?: string;
   reviewedBy?: string;
+  hasAppeal?: boolean;
+  appeal?: PublicAppealSummary;
   createdAt: string;
 }
 
@@ -78,6 +90,7 @@ export interface ReportFormData {
 
 interface CommunityReportsViewProps {
   initialMode?: "list" | "submit";
+  initialSearchQuery?: string;
   prefillData?: Partial<ReportFormData>;
   currentUserEmail?: string;
   currentUserId?: string;
@@ -115,8 +128,24 @@ const CATEGORIES = [
   { id: "scam", label: "Advance-Fee Scams" }
 ];
 
+const APPEAL_ROLES = [
+  "Domain Owner",
+  "Authorized Account Owner",
+  "IT / Security Administrator",
+  "Legal Representative"
+];
+
+const APPEAL_REASONS = [
+  "False positive / legitimate communication",
+  "Account was compromised & has been secured",
+  "Spoofed / unauthorized impersonation of my address",
+  "Issue resolved / misunderstanding",
+  "Other"
+];
+
 export default function CommunityReportsView({
   initialMode = "list",
+  initialSearchQuery = "",
   prefillData,
   currentUserEmail,
   currentUserId,
@@ -125,11 +154,25 @@ export default function CommunityReportsView({
   const [mode, setMode] = useState<"list" | "submit">(initialMode);
   const [reports, setReports] = useState<CommunityReport[]>([]);
   const [loading, setLoading] = useState(true);
-  const [searchQuery, setSearchQuery] = useState("");
+  const [searchQuery, setSearchQuery] = useState(initialSearchQuery);
   const [selectedCategory, setSelectedCategory] = useState("all");
   const [inspectModalReport, setInspectModalReport] = useState<CommunityReport | null>(null);
   const [inspectActiveTab, setInspectActiveTab] = useState<"evidence" | "advisory">("evidence");
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
+
+  // Owner Appeal Modal State
+  const [appealModalReport, setAppealModalReport] = useState<CommunityReport | null>(null);
+  const [appealForm, setAppealForm] = useState({
+    appellantName: "",
+    appellantEmail: currentUserEmail || "",
+    appellantRole: APPEAL_ROLES[0],
+    reason: APPEAL_REASONS[0],
+    explanation: "",
+    evidenceLinksOrText: ""
+  });
+  const [appealSubmitting, setAppealSubmitting] = useState(false);
+  const [appealError, setAppealError] = useState<string | null>(null);
+  const [appealSuccess, setAppealSuccess] = useState(false);
 
   // Screenshot upload state
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -267,11 +310,12 @@ export default function CommunityReportsView({
     }
   }, [prefillData]);
 
-  const loadReports = async () => {
+  const loadReports = async (overrideQuery?: string) => {
     setLoading(true);
     try {
+      const qVal = overrideQuery !== undefined ? overrideQuery : searchQuery;
       const params = new URLSearchParams();
-      if (searchQuery.trim()) params.set("q", searchQuery.trim());
+      if (qVal.trim()) params.set("q", qVal.trim());
       if (selectedCategory !== "all") params.set("category", selectedCategory);
 
       const res = await fetch(`/api/reports/public?${params.toString()}`);
@@ -287,6 +331,19 @@ export default function CommunityReportsView({
   };
 
   useEffect(() => {
+    setMode(initialMode);
+  }, [initialMode]);
+
+  useEffect(() => {
+    if (initialSearchQuery !== undefined) {
+      setSearchQuery(initialSearchQuery);
+      if (mode === "list") {
+        loadReports(initialSearchQuery);
+      }
+    }
+  }, [initialSearchQuery]);
+
+  useEffect(() => {
     if (mode === "list") {
       loadReports();
     }
@@ -295,6 +352,60 @@ export default function CommunityReportsView({
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     loadReports();
+  };
+
+  const openAppealModal = (rep: CommunityReport) => {
+    setAppealError(null);
+    setAppealSuccess(false);
+    setAppealForm({
+      appellantName: "",
+      appellantEmail: currentUserEmail || "",
+      appellantRole: APPEAL_ROLES[0],
+      reason: APPEAL_REASONS[0],
+      explanation: "",
+      evidenceLinksOrText: ""
+    });
+    setAppealModalReport(rep);
+  };
+
+  const handleSubmitAppeal = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!appealModalReport) return;
+    setAppealError(null);
+
+    if (!appealForm.appellantName.trim() || !appealForm.appellantEmail.trim() || !appealForm.explanation.trim()) {
+      setAppealError("Please enter your full name, owner contact email, and a detailed explanation.");
+      return;
+    }
+
+    setAppealSubmitting(true);
+    try {
+      const res = await fetch(`/api/reports/${appealModalReport.id}/appeal`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(currentUserId ? { "x-firebase-uid": currentUserId } : {})
+        },
+        body: JSON.stringify(appealForm)
+      });
+
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(json.error || "Failed to submit appeal.");
+      }
+
+      if (json.report) {
+        setReports(prev => prev.map(r => (r.id === json.report.id ? json.report : r)));
+        if (inspectModalReport?.id === json.report.id) {
+          setInspectModalReport(json.report);
+        }
+      }
+      setAppealSuccess(true);
+    } catch (err: any) {
+      setAppealError(err.message || "Error submitting appeal.");
+    } finally {
+      setAppealSubmitting(false);
+    }
   };
 
   const toggleReason = (reason: string) => {
@@ -498,14 +609,31 @@ export default function CommunityReportsView({
             </div>
           </div>
 
+          {/* Owner Notice Banner if signed-in email matches any public report */}
+          {currentUserEmail && reports.some(r => r.senderEmail?.toLowerCase().trim() === currentUserEmail.toLowerCase().trim()) && (
+            <div className="p-5 bg-blue-50 border border-blue-200 rounded-[2rem] flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <Scale className="w-5 h-5 text-blue-700 shrink-0 mt-0.5" />
+                <div className="space-y-1 text-xs">
+                  <p className="font-black uppercase tracking-wider text-blue-900">
+                    Your Email Address Appears in Public Reports
+                  </p>
+                  <p className="text-blue-800/80 font-medium leading-relaxed">
+                    Your signed-in address (<span className="font-mono font-bold">{currentUserEmail}</span>) is listed below. If your account was falsely reported, impersonated, or remediated, you can submit an official owner appeal for admin review.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Reports Grid */}
           <div className="space-y-4">
-            <div className="flex justify-between items-center px-2">
+            <div className="flex flex-wrap justify-between items-center gap-2 px-2">
               <span className="text-[10px] font-black uppercase tracking-widest text-navy/50">
                 Verified Community Reports ({reports.length})
               </span>
               <span className="text-[10px] font-mono text-navy/40">
-                Admin Reviewed & Sanitized
+                Admin Reviewed • Email Owners May Appeal
               </span>
             </div>
 
@@ -534,87 +662,117 @@ export default function CommunityReportsView({
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {reports.map(rep => (
-                  <div
-                    key={rep.id}
-                    className="bg-white rounded-[2rem] border border-navy/10 p-6 space-y-4 hover:border-orange/40 hover:shadow-lg transition-all group flex flex-col justify-between"
-                  >
-                    <div className="space-y-3">
-                      {/* Top Badges */}
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <span className="px-2.5 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest bg-red-100 text-red-700 border border-red-200">
-                            {rep.reasons?.[0] || "Phishing Threat"}
+                {reports.map(rep => {
+                  const isPendingAppeal = rep.hasAppeal && rep.appeal?.status === "pending";
+                  const isDismissedAppeal = rep.hasAppeal && rep.appeal?.status === "rejected";
+                  return (
+                    <div
+                      key={rep.id}
+                      className="bg-white rounded-[2rem] border border-navy/10 p-6 space-y-4 hover:border-orange/40 hover:shadow-lg transition-all group flex flex-col justify-between"
+                    >
+                      <div className="space-y-3">
+                        {/* Top Badges */}
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="px-2.5 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest bg-red-100 text-red-700 border border-red-200">
+                              {rep.reasons?.[0] || "Phishing Threat"}
+                            </span>
+                            {rep.targetBrand && (
+                              <span className="px-2.5 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest bg-orange/10 text-orange border border-orange/20">
+                                Impersonates: {rep.targetBrand}
+                              </span>
+                            )}
+                            {isPendingAppeal && (
+                              <span className="px-2.5 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest bg-blue-100 text-blue-800 border border-blue-200">
+                                Appeal Under Review
+                              </span>
+                            )}
+                            {isDismissedAppeal && (
+                              <span className="px-2.5 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest bg-navy/5 text-navy/60 border border-navy/10">
+                                Appeal Dismissed
+                              </span>
+                            )}
+                          </div>
+                          <span className="text-[10px] font-mono text-navy/40 shrink-0">
+                            {rep.dateReceived || new Date(rep.createdAt).toLocaleDateString()}
                           </span>
-                          {rep.targetBrand && (
-                            <span className="px-2.5 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest bg-orange/10 text-orange border border-orange/20">
-                              Impersonates: {rep.targetBrand}
-                            </span>
-                          )}
                         </div>
-                        <span className="text-[10px] font-mono text-navy/40">
-                          {rep.dateReceived || new Date(rep.createdAt).toLocaleDateString()}
-                        </span>
-                      </div>
 
-                      {/* Subject */}
-                      <h3 className="font-display font-black text-base text-navy group-hover:text-orange transition-colors leading-snug line-clamp-2">
-                        {rep.subject}
-                      </h3>
+                        {/* Subject */}
+                        <h3 className="font-display font-black text-base text-navy group-hover:text-orange transition-colors leading-snug line-clamp-2">
+                          {rep.subject}
+                        </h3>
 
-                      {/* Sender Info */}
-                      <div className="p-3 bg-navy/[0.02] rounded-xl border border-navy/5 space-y-0.5 text-xs">
-                        <span className="text-[8px] font-black uppercase tracking-wider text-navy/40 block">
-                          Reported Sender Origin
-                        </span>
-                        <p className="font-bold text-navy truncate">
-                          {rep.senderDisplayName || "Unknown Display Name"}
-                        </p>
-                        <p className="font-mono text-[11px] text-navy/70 truncate">
-                          {rep.senderEmail}
-                        </p>
-                      </div>
-
-                      {/* Excerpt */}
-                      {rep.bodyExcerpt && (
-                        <p className="text-xs text-navy/70 font-medium line-clamp-3 leading-relaxed italic bg-navy/[0.01] p-3 rounded-xl border border-navy/5">
-                          "{rep.bodyExcerpt}"
-                        </p>
-                      )}
-
-                      {/* Red Flags Chips */}
-                      {rep.redFlagsObserved && rep.redFlagsObserved.length > 0 && (
-                        <div className="flex flex-wrap gap-1.5 pt-1">
-                          {rep.redFlagsObserved.slice(0, 3).map((rf, i) => (
-                            <span key={i} className="text-[9px] font-bold px-2 py-0.5 bg-red-50 text-red-800 rounded-md border border-red-100">
-                              • {rf}
-                            </span>
-                          ))}
-                          {rep.redFlagsObserved.length > 3 && (
-                            <span className="text-[9px] font-bold px-1.5 py-0.5 text-navy/40">
-                              +{rep.redFlagsObserved.length - 3} more
-                            </span>
-                          )}
+                        {/* Sender Info */}
+                        <div className="p-3 bg-navy/[0.02] rounded-xl border border-navy/5 space-y-0.5 text-xs">
+                          <span className="text-[8px] font-black uppercase tracking-wider text-navy/40 block">
+                            Reported Sender Origin
+                          </span>
+                          <p className="font-bold text-navy truncate">
+                            {rep.senderDisplayName || "Unknown Display Name"}
+                          </p>
+                          <p className="font-mono text-[11px] text-navy/70 truncate">
+                            {rep.senderEmail}
+                          </p>
                         </div>
-                      )}
-                    </div>
 
-                    {/* Bottom Action */}
-                    <div className="pt-4 border-t border-navy/5 flex items-center justify-between">
-                      <div className="flex items-center gap-1.5 text-[10px] font-bold text-green-700">
-                        <ShieldCheck className="w-3.5 h-3.5" />
-                        <span>Admin Verified</span>
+                        {/* Excerpt */}
+                        {rep.bodyExcerpt && (
+                          <p className="text-xs text-navy/70 font-medium line-clamp-3 leading-relaxed italic bg-navy/[0.01] p-3 rounded-xl border border-navy/5">
+                            "{rep.bodyExcerpt}"
+                          </p>
+                        )}
+
+                        {/* Red Flags Chips */}
+                        {rep.redFlagsObserved && rep.redFlagsObserved.length > 0 && (
+                          <div className="flex flex-wrap gap-1.5 pt-1">
+                            {rep.redFlagsObserved.slice(0, 3).map((rf, i) => (
+                              <span key={i} className="text-[9px] font-bold px-2 py-0.5 bg-red-50 text-red-800 rounded-md border border-red-100">
+                                • {rf}
+                              </span>
+                            ))}
+                            {rep.redFlagsObserved.length > 3 && (
+                              <span className="text-[9px] font-bold px-1.5 py-0.5 text-navy/40">
+                                +{rep.redFlagsObserved.length - 3} more
+                              </span>
+                            )}
+                          </div>
+                        )}
                       </div>
-                      <button
-                        onClick={() => setInspectModalReport(rep)}
-                        className="px-4 py-2 bg-navy/5 hover:bg-navy text-navy hover:text-white rounded-xl text-xs font-black uppercase tracking-wider transition-colors cursor-pointer flex items-center gap-1.5"
-                      >
-                        <Eye className="w-3.5 h-3.5" />
-                        View Evidence & Advisory
-                      </button>
+
+                      {/* Bottom Actions */}
+                      <div className="pt-4 border-t border-navy/5 flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5 text-[10px] font-bold text-green-700">
+                          <ShieldCheck className="w-3.5 h-3.5" />
+                          <span>Admin Verified</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {!isPendingAppeal && (
+                            <button
+                              type="button"
+                              onClick={() => openAppealModal(rep)}
+                              className="px-3 py-2 bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-200 rounded-xl text-[10px] font-black uppercase tracking-wider transition-colors cursor-pointer flex items-center gap-1"
+                              title="Reported email owner? Submit an appeal for admin review"
+                            >
+                              <Scale className="w-3 h-3" />
+                              <span>Appeal</span>
+                            </button>
+                          )}
+                          <button
+                            onClick={() => {
+                              setInspectActiveTab("evidence");
+                              setInspectModalReport(rep);
+                            }}
+                            className="px-3.5 py-2 bg-navy/5 hover:bg-navy text-navy hover:text-white rounded-xl text-[10px] font-black uppercase tracking-wider transition-colors cursor-pointer flex items-center gap-1.5"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                            <span>View Evidence & Advisory</span>
+                          </button>
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -1467,13 +1625,37 @@ export default function CommunityReportsView({
             </div>
 
             {/* Modal Footer (Fixed at bottom) */}
-            <div className="p-5 bg-navy/[0.02] border-t border-navy/10 flex-shrink-0 flex items-center justify-between gap-4">
-              <div className="flex items-center gap-1.5 text-[11px] font-bold text-green-700">
-                <ShieldCheck className="w-4 h-4 text-green-600" />
-                <span>Admin Verified Record</span>
+            <div className="p-5 bg-navy/[0.02] border-t border-navy/10 flex-shrink-0 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2 flex-wrap">
+                <div className="flex items-center gap-1.5 text-[11px] font-bold text-green-700">
+                  <ShieldCheck className="w-4 h-4 text-green-600" />
+                  <span>Admin Verified Record</span>
+                </div>
+                {inspectModalReport.hasAppeal && inspectModalReport.appeal && (
+                  <span
+                    className={`px-2.5 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest border ${
+                      inspectModalReport.appeal.status === "pending"
+                        ? "bg-blue-100 text-blue-800 border-blue-200"
+                        : "bg-navy/5 text-navy/60 border-navy/10"
+                    }`}
+                  >
+                    {inspectModalReport.appeal.status === "pending" ? "Owner Appeal Pending" : "Appeal Dismissed"}
+                  </span>
+                )}
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                {(!inspectModalReport.hasAppeal || inspectModalReport.appeal?.status !== "pending") && (
+                  <button
+                    type="button"
+                    onClick={() => openAppealModal(inspectModalReport)}
+                    className="px-4 py-2.5 bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-200 rounded-xl text-xs font-black uppercase tracking-wider transition-colors cursor-pointer flex items-center gap-1.5"
+                  >
+                    <Scale className="w-3.5 h-3.5" />
+                    <span>Appeal (Email Owner)</span>
+                  </button>
+                )}
+
                 {inspectActiveTab === "evidence" ? (
                   <button
                     type="button"
@@ -1503,6 +1685,184 @@ export default function CommunityReportsView({
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* OWNER APPEAL MODAL */}
+      {appealModalReport && (
+        <div className="fixed inset-0 bg-navy/70 backdrop-blur-sm z-[60] flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-[2.5rem] max-w-xl w-full border border-navy/10 shadow-2xl overflow-hidden my-auto animate-in fade-in zoom-in-95">
+            <div className="p-6 bg-navy text-white flex items-start justify-between gap-4">
+              <div>
+                <span className="px-2.5 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest bg-blue-500/20 text-blue-200 border border-blue-400/30 inline-flex items-center gap-1.5">
+                  <Scale className="w-3 h-3" />
+                  Reported Email Owner Appeal
+                </span>
+                <h3 className="text-lg font-display font-black uppercase italic tracking-tight text-white mt-2">
+                  Submit Appeal for Review
+                </h3>
+                <p className="text-xs font-mono text-white/70 mt-0.5 truncate">
+                  Reported Address: {appealModalReport.senderEmail}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAppealModalReport(null)}
+                className="text-white/60 hover:text-white p-2 rounded-xl hover:bg-white/10 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {appealSuccess ? (
+              <div className="p-8 text-center space-y-4">
+                <div className="w-14 h-14 bg-green-500/10 text-green-600 rounded-full flex items-center justify-center mx-auto">
+                  <CheckCircle2 className="w-8 h-8" />
+                </div>
+                <h4 className="font-display font-black text-lg uppercase italic text-navy">
+                  Appeal Submitted to Administrators
+                </h4>
+                <p className="text-xs text-navy/70 leading-relaxed max-w-md mx-auto">
+                  Your appeal for <span className="font-mono font-bold text-navy">{appealModalReport.senderEmail}</span> has been queued for administrator review. Only verified Mail Verifier admins can uphold an appeal, unpublish, or delete the report.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setAppealModalReport(null)}
+                  className="px-6 py-3 bg-navy text-white rounded-2xl text-xs font-black uppercase tracking-wider cursor-pointer"
+                >
+                  Close
+                </button>
+              </div>
+            ) : (
+              <form onSubmit={handleSubmitAppeal} className="p-6 space-y-4 max-h-[75vh] overflow-y-auto text-xs text-navy">
+                <div className="p-3.5 bg-navy/[0.03] rounded-2xl border border-navy/10 space-y-1">
+                  <span className="text-[9px] font-black uppercase tracking-wider text-navy/40 block">
+                    Report Under Appeal
+                  </span>
+                  <p className="font-bold text-navy">{appealModalReport.subject}</p>
+                  <p className="font-mono text-[11px] text-navy/60">
+                    {appealModalReport.senderDisplayName || "Unknown"} &lt;{appealModalReport.senderEmail}&gt;
+                  </p>
+                </div>
+
+                {appealError && (
+                  <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl font-bold flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                    <span>{appealError}</span>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[10px] font-black uppercase tracking-wider text-navy/60 block mb-1">
+                      Full Name / Authorized Rep <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={appealForm.appellantName}
+                      onChange={e => setAppealForm({ ...appealForm, appellantName: e.target.value })}
+                      placeholder="Your full name"
+                      className="w-full px-3.5 py-2.5 bg-navy/[0.03] border border-navy/10 rounded-xl text-xs text-navy focus:outline-none focus:border-orange"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black uppercase tracking-wider text-navy/60 block mb-1">
+                      Owner Contact Email <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="email"
+                      required
+                      value={appealForm.appellantEmail}
+                      onChange={e => setAppealForm({ ...appealForm, appellantEmail: e.target.value })}
+                      placeholder="owner@domain.com"
+                      className="w-full px-3.5 py-2.5 bg-navy/[0.03] border border-navy/10 rounded-xl text-xs font-mono text-navy focus:outline-none focus:border-orange"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[10px] font-black uppercase tracking-wider text-navy/60 block mb-1">
+                      Role / Ownership Basis
+                    </label>
+                    <select
+                      value={appealForm.appellantRole}
+                      onChange={e => setAppealForm({ ...appealForm, appellantRole: e.target.value })}
+                      className="w-full px-3.5 py-2.5 bg-navy/[0.03] border border-navy/10 rounded-xl text-xs font-bold text-navy focus:outline-none focus:border-orange"
+                    >
+                      {APPEAL_ROLES.map(role => (
+                        <option key={role} value={role}>
+                          {role}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black uppercase tracking-wider text-navy/60 block mb-1">
+                      Appeal Reason
+                    </label>
+                    <select
+                      value={appealForm.reason}
+                      onChange={e => setAppealForm({ ...appealForm, reason: e.target.value })}
+                      className="w-full px-3.5 py-2.5 bg-navy/[0.03] border border-navy/10 rounded-xl text-xs font-bold text-navy focus:outline-none focus:border-orange"
+                    >
+                      {APPEAL_REASONS.map(reason => (
+                        <option key={reason} value={reason}>
+                          {reason}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-wider text-navy/60 block mb-1">
+                    Detailed Explanation <span className="text-red-500">*</span>
+                  </label>
+                  <textarea
+                    rows={4}
+                    required
+                    value={appealForm.explanation}
+                    onChange={e => setAppealForm({ ...appealForm, explanation: e.target.value })}
+                    placeholder="Explain why this report is inaccurate, spoofed without authorization, or how the issue was remediated..."
+                    className="w-full px-3.5 py-2.5 bg-navy/[0.03] border border-navy/10 rounded-xl text-xs text-navy focus:outline-none focus:border-orange"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[10px] font-black uppercase tracking-wider text-navy/60 block mb-1">
+                    Verification / Evidence Details (Optional)
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={appealForm.evidenceLinksOrText}
+                    onChange={e => setAppealForm({ ...appealForm, evidenceLinksOrText: e.target.value })}
+                    placeholder="Provide SPF/DKIM/DMARC records, domain ownership proof, or incident remediation ticket references..."
+                    className="w-full px-3.5 py-2.5 bg-navy/[0.03] border border-navy/10 rounded-xl text-xs font-mono text-navy focus:outline-none focus:border-orange"
+                  />
+                </div>
+
+                <div className="flex justify-end gap-2 pt-3 border-t border-navy/10">
+                  <button
+                    type="button"
+                    onClick={() => setAppealModalReport(null)}
+                    className="px-5 py-2.5 bg-navy/5 hover:bg-navy/10 text-navy rounded-xl text-xs font-black uppercase tracking-wider cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={appealSubmitting}
+                    className="px-6 py-2.5 bg-navy hover:bg-navy/90 text-orange rounded-xl text-xs font-black uppercase tracking-wider flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    <span>{appealSubmitting ? "Submitting..." : "Submit Owner Appeal"}</span>
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
         </div>
       )}

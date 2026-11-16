@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { initializeApp, applicationDefault, getApps, cert } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import fs from "fs";
@@ -47,6 +48,11 @@ try {
     }) : getApps()[0];
 
     db = getFirestore(app, config.firestoreDatabaseId || "ai-studio-mailverifier-dc1ff58a-9c34-4891-a598-e435ebb2f5a6");
+    try {
+      db.settings({ ignoreUndefinedProperties: true });
+    } catch {
+      // ignore if already initialized
+    }
 
     // Verify permissions asynchronously on startup, and disable Firestore if they're missing
     db.collection("_connection_test").limit(1).get().then(() => {
@@ -71,6 +77,8 @@ export interface Subscription {
   invoices: Array<{ id: string; date: string; amount: string; status: "paid" | "pending" }>;
 }
 
+export const SUPER_ADMIN_EMAIL = "adamu0533@gmail.com";
+
 export interface User {
   id: string;
   email: string;
@@ -86,6 +94,12 @@ export interface User {
   lockedUntil?: string | null;
 }
 
+export interface AdminInvite {
+  email: string;
+  addedBy: string;
+  createdAt: string;
+}
+
 export interface ReportAppeal {
   appellantName: string;
   appellantEmail: string;
@@ -93,6 +107,7 @@ export interface ReportAppeal {
   reason: string;
   explanation: string;
   evidenceLinksOrText?: string;
+  isVerifiedSenderMatch?: boolean;
   status: "pending" | "approved" | "rejected";
   submittedAt: string;
   reviewedAt?: string;
@@ -127,6 +142,23 @@ export interface CommunityReport {
   appeal?: ReportAppeal;
   createdAt: string;
   updatedAt?: string;
+}
+
+function stripUndefined<T extends Record<string, any>>(obj: T): T {
+  const out: Record<string, any> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v !== undefined) {
+      out[k] = v;
+    }
+  }
+  return out as T;
+}
+
+function normalizeUserRoles(user: User): User {
+  if (user.email && user.email.toLowerCase().trim() === SUPER_ADMIN_EMAIL) {
+    return { ...user, isAdmin: true, isSuperAdmin: true };
+  }
+  return { ...user, isAdmin: Boolean(user.isAdmin), isSuperAdmin: Boolean(user.isSuperAdmin) };
 }
 
 const DB_FILE = path.join(process.cwd(), "db.json");
@@ -164,7 +196,7 @@ const localDb = {
     const normalized = email.toLowerCase().trim();
     for (const id in data.users) {
       if (data.users[id].email === normalized) {
-        return data.users[id];
+        return normalizeUserRoles(data.users[id]);
       }
     }
     return null;
@@ -172,15 +204,18 @@ const localDb = {
 
   getUserById(id: string): User | null {
     const data = readLocalDb();
-    return data.users[id] || null;
+    return data.users[id] ? normalizeUserRoles(data.users[id]) : null;
   },
 
   createUser(email: string, passwordHash: string, name: string): User {
     const data = readLocalDb();
     const id = "usr_" + Math.random().toString(36).substring(2, 11);
+    const normalizedEmail = email.toLowerCase().trim();
+    const isSuper = normalizedEmail === SUPER_ADMIN_EMAIL;
+    const isInvitedAdmin = Boolean(data.adminInvites && data.adminInvites[normalizedEmail]);
     const newUser: User = {
       id,
-      email: email.toLowerCase().trim(),
+      email: normalizedEmail,
       passwordHash,
       name: name.trim(),
       subscription: {
@@ -192,12 +227,16 @@ const localDb = {
         invoices: []
       },
       createdAt: new Date().toISOString(),
-      isAdmin: false,
+      isAdmin: isSuper || isInvitedAdmin,
+      isSuperAdmin: isSuper,
       isVerified: false,
       failedLoginAttempts: 0,
       lockedUntil: null
     };
     data.users[id] = newUser;
+    if (isInvitedAdmin && data.adminInvites) {
+      delete data.adminInvites[normalizedEmail];
+    }
     writeLocalDb(data);
     return newUser;
   },
@@ -294,6 +333,29 @@ const localDb = {
     delete data.reports[id];
     writeLocalDb(data);
     return true;
+  },
+
+  getAdminInvites(): AdminInvite[] {
+    const data = readLocalDb();
+    if (!data.adminInvites) return [];
+    return Object.values(data.adminInvites);
+  },
+
+  addAdminInvite(invite: AdminInvite): AdminInvite {
+    const data = readLocalDb();
+    if (!data.adminInvites) data.adminInvites = {};
+    data.adminInvites[invite.email.toLowerCase().trim()] = invite;
+    writeLocalDb(data);
+    return invite;
+  },
+
+  removeAdminInvite(email: string): boolean {
+    const data = readLocalDb();
+    const norm = email.toLowerCase().trim();
+    if (!data.adminInvites || !data.adminInvites[norm]) return false;
+    delete data.adminInvites[norm];
+    writeLocalDb(data);
+    return true;
   }
 };
 
@@ -306,7 +368,7 @@ export const dbService = {
     try {
       const snapshot = await db.collection("users").where("email", "==", normalizedEmail).limit(1).get();
       if (snapshot.empty) return null;
-      return snapshot.docs[0].data() as User;
+      return normalizeUserRoles(snapshot.docs[0].data() as User);
     } catch (e: any) {
       handleDbFallback("getUserByEmail", e);
       return localDb.getUserByEmail(normalizedEmail);
@@ -320,7 +382,7 @@ export const dbService = {
     try {
       const doc = await db.collection("users").doc(id).get();
       if (!doc.exists) return null;
-      return doc.data() as User;
+      return normalizeUserRoles(doc.data() as User);
     } catch (e: any) {
       handleDbFallback("getUserById", e);
       return localDb.getUserById(id);
@@ -332,9 +394,21 @@ export const dbService = {
       return localDb.createUser(email, passwordHash, name);
     }
     const id = "usr_" + Math.random().toString(36).substring(2, 11);
+    const normalizedEmail = email.toLowerCase().trim();
+    const isSuper = normalizedEmail === SUPER_ADMIN_EMAIL;
+    let isInvitedAdmin = false;
+    try {
+      const inviteDoc = await db.collection("admin_invites").doc(normalizedEmail).get();
+      if (inviteDoc.exists) {
+        isInvitedAdmin = true;
+        await db.collection("admin_invites").doc(normalizedEmail).delete().catch(() => {});
+      }
+    } catch {
+      // ignore invite check failure
+    }
     const newUser: User = {
       id,
-      email: email.toLowerCase().trim(),
+      email: normalizedEmail,
       passwordHash,
       name: name.trim(),
       subscription: {
@@ -346,13 +420,17 @@ export const dbService = {
         invoices: []
       },
       createdAt: new Date().toISOString(),
-      isAdmin: false,
+      isAdmin: isSuper || isInvitedAdmin,
+      isSuperAdmin: isSuper,
       isVerified: false,
       failedLoginAttempts: 0,
       lockedUntil: null
     };
     try {
       await db.collection("users").doc(id).set(newUser);
+      if (newUser.isAdmin) {
+        await db.collection("admins").doc(id).set({ email: normalizedEmail, isSuperAdmin: isSuper, createdAt: new Date().toISOString() }).catch(() => {});
+      }
       return newUser;
     } catch (e: any) {
       handleDbFallback("createUser", e);
@@ -432,14 +510,14 @@ export const dbService = {
 
   async getAllUsers(): Promise<User[]> {
     if (!db) {
-      return localDb.getAllUsers();
+      return localDb.getAllUsers().map(normalizeUserRoles);
     }
     try {
       const snapshot = await db.collection("users").get();
-      return snapshot.docs.map(doc => doc.data() as User);
+      return snapshot.docs.map(doc => normalizeUserRoles(doc.data() as User));
     } catch (e: any) {
       handleDbFallback("getAllUsers", e);
-      return localDb.getAllUsers();
+      return localDb.getAllUsers().map(normalizeUserRoles);
     }
   },
 
@@ -461,13 +539,13 @@ export const dbService = {
 
   async createReport(reportData: Omit<CommunityReport, "id" | "createdAt" | "status"> & { id?: string; status?: "pending_review" | "approved" | "rejected"; createdAt?: string }): Promise<CommunityReport> {
     const id = reportData.id || "rep_" + Math.random().toString(36).substring(2, 11) + "_" + Date.now().toString(36);
-    const newReport: CommunityReport = {
+    const newReport = stripUndefined({
       ...reportData,
       id,
       status: reportData.status || "pending_review",
       createdAt: reportData.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString()
-    };
+    }) as CommunityReport;
     if (!db) {
       return localDb.createReport(newReport);
     }
@@ -544,11 +622,11 @@ export const dbService = {
       const docRef = db.collection("community_reports").doc(id);
       const doc = await docRef.get();
       if (!doc.exists) return null;
-      const updated = {
+      const updated = stripUndefined({
         ...doc.data(),
         ...updates,
         updatedAt: new Date().toISOString()
-      } as CommunityReport;
+      }) as CommunityReport;
       await docRef.set(updated);
       return updated;
     } catch (e: any) {
@@ -570,6 +648,69 @@ export const dbService = {
     } catch (e: any) {
       handleDbFallback("deleteReport", e);
       return localDb.deleteReport(id);
+    }
+  },
+
+  async syncAdminDoc(userId: string, email: string, isAdmin: boolean, isSuperAdmin = false): Promise<void> {
+    if (!db) return;
+    try {
+      if (isAdmin) {
+        await db.collection("admins").doc(userId).set({
+          email: email.toLowerCase().trim(),
+          isSuperAdmin,
+          updatedAt: new Date().toISOString()
+        }, { merge: true });
+      } else {
+        await db.collection("admins").doc(userId).delete().catch(() => {});
+      }
+    } catch (e: any) {
+      console.warn("Could not sync admins collection:", e.message);
+    }
+  },
+
+  async getAdminInvites(): Promise<AdminInvite[]> {
+    if (!db) {
+      return localDb.getAdminInvites();
+    }
+    try {
+      const snapshot = await db.collection("admin_invites").get();
+      return snapshot.docs.map(doc => doc.data() as AdminInvite);
+    } catch (e: any) {
+      handleDbFallback("getAdminInvites", e);
+      return localDb.getAdminInvites();
+    }
+  },
+
+  async addAdminInvite(email: string, addedBy: string): Promise<AdminInvite> {
+    const norm = email.toLowerCase().trim();
+    const invite: AdminInvite = {
+      email: norm,
+      addedBy,
+      createdAt: new Date().toISOString()
+    };
+    if (!db) {
+      return localDb.addAdminInvite(invite);
+    }
+    try {
+      await db.collection("admin_invites").doc(norm).set(invite);
+      return invite;
+    } catch (e: any) {
+      handleDbFallback("addAdminInvite", e);
+      return localDb.addAdminInvite(invite);
+    }
+  },
+
+  async removeAdminInvite(email: string): Promise<boolean> {
+    const norm = email.toLowerCase().trim();
+    if (!db) {
+      return localDb.removeAdminInvite(norm);
+    }
+    try {
+      await db.collection("admin_invites").doc(norm).delete();
+      return true;
+    } catch (e: any) {
+      handleDbFallback("removeAdminInvite", e);
+      return localDb.removeAdminInvite(norm);
     }
   }
 };

@@ -4,7 +4,39 @@ import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
 import cookieSession from "cookie-session";
 import bcrypt from "bcryptjs";
-import { dbService } from "./db.js";
+import { dbService, SUPER_ADMIN_EMAIL, ReportAppeal } from "./db.js";
+
+function isAdminUser(user: any): boolean {
+  return Boolean(
+    user?.isAdmin ||
+    user?.isSuperAdmin ||
+    user?.email?.toLowerCase().trim() === SUPER_ADMIN_EMAIL
+  );
+}
+
+function isSuperAdminUser(user: any): boolean {
+  return Boolean(
+    user?.isSuperAdmin ||
+    user?.email?.toLowerCase().trim() === SUPER_ADMIN_EMAIL
+  );
+}
+
+function sanitizePublicReport(rep: any) {
+  const { submittedByUserId, submittedByUserEmail, ...rest } = rep;
+  return {
+    ...rest,
+    submittedByUserEmail: rep.isAnonymous ? undefined : submittedByUserEmail,
+    appeal: rep.appeal
+      ? {
+          status: rep.appeal.status,
+          reason: rep.appeal.reason,
+          submittedAt: rep.appeal.submittedAt,
+          reviewedAt: rep.appeal.reviewedAt,
+          reviewNotes: rep.appeal.reviewNotes
+        }
+      : undefined
+  };
+}
 
 dotenv.config();
 
@@ -418,9 +450,30 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
       await dbService.updateUser(user.id, { failedLoginAttempts: 0, lockedUntil: null });
     }
 
-    req.session!.userId = user.id;
+    // Check if user has a pending admin invite
+    let activeUser = user;
+    const invites = await dbService.getAdminInvites();
+    const hasInvite = invites.some(inv => inv.email.toLowerCase() === activeUser.email.toLowerCase().trim());
+    if (hasInvite && !activeUser.isAdmin) {
+      const promoted = await dbService.updateUser(activeUser.id, { isAdmin: true });
+      if (promoted) activeUser = promoted;
+      await dbService.syncAdminDoc(activeUser.id, activeUser.email, true, isSuperAdminUser(activeUser));
+      await dbService.removeAdminInvite(activeUser.email);
+    }
 
-    res.json({ success: true, user: { id: user.id, email: user.email, name: user.name, subscription: user.subscription } });
+    req.session!.userId = activeUser.id;
+
+    res.json({
+      success: true,
+      user: {
+        id: activeUser.id,
+        email: activeUser.email,
+        name: activeUser.name,
+        subscription: activeUser.subscription,
+        isAdmin: isAdminUser(activeUser),
+        isSuperAdmin: isSuperAdminUser(activeUser)
+      }
+    });
   } catch (error: any) {
     console.error("Login error:", error);
     res.status(500).json({ error: error?.message || "Failed to login" });
@@ -444,7 +497,16 @@ app.get("/api/auth/me", async (req, res) => {
     return res.json({ user: null });
   }
 
-  res.json({ user: { id: user.id, email: user.email, name: user.name, subscription: user.subscription, isAdmin: user.isAdmin } });
+  res.json({
+    user: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      subscription: user.subscription,
+      isAdmin: isAdminUser(user),
+      isSuperAdmin: isSuperAdminUser(user)
+    }
+  });
 });
 
 app.post("/api/auth/subscription", async (req, res) => {
@@ -465,7 +527,7 @@ app.get("/api/admin/users", async (req, res) => {
   const currentUid = req.session?.userId || req.headers['x-firebase-uid'] as string;
   if (!currentUid) return res.status(401).json({ error: "Unauthorized" });
   const requestingUser = await dbService.getUserById(currentUid);
-  if (!requestingUser?.isAdmin) return res.status(403).json({ error: "Forbidden" });
+  if (!isAdminUser(requestingUser)) return res.status(403).json({ error: "Forbidden" });
 
   const users = await dbService.getAllUsers();
   const safeUsers = users.map(u => ({
@@ -473,6 +535,9 @@ app.get("/api/admin/users", async (req, res) => {
     email: u.email,
     name: u.name,
     subscription: u.subscription,
+    createdAt: u.createdAt,
+    isAdmin: isAdminUser(u),
+    isSuperAdmin: isSuperAdminUser(u),
     status: u.subscription ? "active" : "inactive"
   }));
   res.json(safeUsers);
@@ -482,13 +547,25 @@ app.delete("/api/admin/users/:id", async (req, res) => {
   const currentUid = req.session?.userId || req.headers['x-firebase-uid'] as string;
   if (!currentUid) return res.status(401).json({ error: "Unauthorized" });
   const requestingUser = await dbService.getUserById(currentUid);
-  if (!requestingUser?.isAdmin) return res.status(403).json({ error: "Forbidden" });
+  if (!isAdminUser(requestingUser)) return res.status(403).json({ error: "Forbidden" });
 
   const { id } = req.params;
+  const targetUser = await dbService.getUserById(id);
+  if (!targetUser) {
+    return res.status(404).json({ error: "User not found" });
+  }
+  if (isSuperAdminUser(targetUser)) {
+    return res.status(403).json({ error: "Super Admin account cannot be deleted." });
+  }
+  if (isAdminUser(targetUser) && !isSuperAdminUser(requestingUser)) {
+    return res.status(403).json({ error: "Only the Super Admin can delete another admin account." });
+  }
+
   const deleted = await dbService.deleteUser(id);
   if (!deleted) {
     return res.status(404).json({ error: "User not found" });
   }
+  await dbService.syncAdminDoc(id, targetUser.email, false);
   res.json({ success: true });
 });
 
@@ -496,7 +573,7 @@ app.post("/api/admin/users/:id/subscription", async (req, res) => {
   const currentUid = req.session?.userId || req.headers['x-firebase-uid'] as string;
   if (!currentUid) return res.status(401).json({ error: "Unauthorized" });
   const requestingUser = await dbService.getUserById(currentUid);
-  if (!requestingUser?.isAdmin) return res.status(403).json({ error: "Forbidden" });
+  if (!isAdminUser(requestingUser)) return res.status(403).json({ error: "Forbidden" });
 
   const { id } = req.params;
   const { subscription } = req.body;
@@ -508,6 +585,129 @@ app.post("/api/admin/users/:id/subscription", async (req, res) => {
   }
 
   res.json({ success: true, subscription: updatedUser.subscription });
+});
+
+// Super Admin: Manage Admins
+app.get("/api/admin/admins", async (req, res) => {
+  try {
+    const currentUid = req.session?.userId || req.headers['x-firebase-uid'] as string;
+    if (!currentUid) return res.status(401).json({ error: "Unauthorized" });
+    const requestingUser = await dbService.getUserById(currentUid);
+    if (!isAdminUser(requestingUser)) return res.status(403).json({ error: "Forbidden" });
+
+    const allUsers = await dbService.getAllUsers();
+    const admins = allUsers
+      .filter(u => isAdminUser(u))
+      .map(u => ({
+        id: u.id,
+        email: u.email,
+        name: u.name,
+        isAdmin: true,
+        isSuperAdmin: isSuperAdminUser(u),
+        createdAt: u.createdAt
+      }));
+    const invites = await dbService.getAdminInvites();
+    res.json({
+      admins,
+      invites,
+      superAdminEmail: SUPER_ADMIN_EMAIL
+    });
+  } catch (err: any) {
+    console.error("Error fetching admins:", err);
+    res.status(500).json({ error: "Failed to fetch admins" });
+  }
+});
+
+app.post("/api/admin/admins", async (req, res) => {
+  try {
+    const currentUid = req.session?.userId || req.headers['x-firebase-uid'] as string;
+    if (!currentUid) return res.status(401).json({ error: "Unauthorized" });
+    const requestingUser = await dbService.getUserById(currentUid);
+    if (!isSuperAdminUser(requestingUser)) {
+      return res.status(403).json({ error: "Forbidden: Only the Super Admin can add other admins." });
+    }
+
+    const { email } = req.body;
+    if (!email || typeof email !== "string" || !email.includes("@")) {
+      return res.status(400).json({ error: "Please provide a valid email address." });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+    const existingUser = await dbService.getUserByEmail(normalizedEmail);
+
+    if (existingUser) {
+      const updated = await dbService.updateUser(existingUser.id, {
+        isAdmin: true,
+        isSuperAdmin: normalizedEmail === SUPER_ADMIN_EMAIL
+      });
+      await dbService.syncAdminDoc(existingUser.id, normalizedEmail, true, normalizedEmail === SUPER_ADMIN_EMAIL);
+      await dbService.removeAdminInvite(normalizedEmail);
+      return res.json({
+        success: true,
+        mode: "promoted",
+        admin: {
+          id: existingUser.id,
+          email: existingUser.email,
+          name: existingUser.name,
+          isAdmin: true,
+          isSuperAdmin: isSuperAdminUser(updated || existingUser)
+        }
+      });
+    } else {
+      const invite = await dbService.addAdminInvite(normalizedEmail, requestingUser!.email);
+      return res.json({
+        success: true,
+        mode: "invited",
+        invite
+      });
+    }
+  } catch (err: any) {
+    console.error("Error adding admin:", err);
+    res.status(500).json({ error: "Failed to add admin" });
+  }
+});
+
+app.delete("/api/admin/admins/:identifier", async (req, res) => {
+  try {
+    const currentUid = req.session?.userId || req.headers['x-firebase-uid'] as string;
+    if (!currentUid) return res.status(401).json({ error: "Unauthorized" });
+    const requestingUser = await dbService.getUserById(currentUid);
+    if (!isSuperAdminUser(requestingUser)) {
+      return res.status(403).json({ error: "Forbidden: Only the Super Admin can remove admins." });
+    }
+
+    const identifier = decodeURIComponent(req.params.identifier).trim();
+    if (identifier.toLowerCase() === SUPER_ADMIN_EMAIL || identifier === requestingUser?.id) {
+      return res.status(400).json({ error: "The Super Admin cannot be removed." });
+    }
+
+    if (identifier.includes("@")) {
+      const targetUser = await dbService.getUserByEmail(identifier);
+      if (targetUser) {
+        if (isSuperAdminUser(targetUser)) {
+          return res.status(400).json({ error: "The Super Admin cannot be removed." });
+        }
+        await dbService.updateUser(targetUser.id, { isAdmin: false, isSuperAdmin: false });
+        await dbService.syncAdminDoc(targetUser.id, targetUser.email, false);
+      }
+      await dbService.removeAdminInvite(identifier);
+      return res.json({ success: true });
+    } else {
+      const targetUser = await dbService.getUserById(identifier);
+      if (!targetUser) {
+        return res.status(404).json({ error: "Admin user not found" });
+      }
+      if (isSuperAdminUser(targetUser)) {
+        return res.status(400).json({ error: "The Super Admin cannot be removed." });
+      }
+      await dbService.updateUser(targetUser.id, { isAdmin: false, isSuperAdmin: false });
+      await dbService.syncAdminDoc(targetUser.id, targetUser.email, false);
+      return res.json({ success: true });
+    }
+  } catch (err: any) {
+    console.error("Error removing admin:", err);
+    res.status(500).json({ error: "Failed to remove admin" });
+  }
 });
 
 // Community Email Reports Endpoints
@@ -579,10 +779,101 @@ app.get("/api/reports/public", async (req, res) => {
     const q = req.query.q as string | undefined;
     const category = req.query.category as string | undefined;
     const reports = await dbService.getPublicReports(q, category);
-    res.json({ reports });
+    res.json({ reports: reports.map(sanitizePublicReport) });
   } catch (err: any) {
     console.error("Error fetching public community reports:", err);
     res.status(500).json({ error: "Failed to fetch community reports" });
+  }
+});
+
+// Check if a specific sender email has approved community reports
+app.get("/api/reports/check", async (req, res) => {
+  try {
+    const email = (req.query.email as string || "").toLowerCase().trim();
+    if (!email) return res.json({ reported: false, count: 0, reports: [] });
+
+    const allApproved = await dbService.getPublicReports();
+    const matches = allApproved.filter(r => r.senderEmail?.toLowerCase().trim() === email);
+    res.json({
+      reported: matches.length > 0,
+      count: matches.length,
+      reports: matches.map(sanitizePublicReport)
+    });
+  } catch (err: any) {
+    console.error("Error checking reported email:", err);
+    res.status(500).json({ error: "Failed to check reported email" });
+  }
+});
+
+// Reported Email Owner Appeal Endpoint
+app.post("/api/reports/:id/appeal", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const currentUid = req.session?.userId || req.headers['x-firebase-uid'] as string;
+    const {
+      appellantName,
+      appellantEmail,
+      appellantRole,
+      reason,
+      explanation,
+      evidenceLinksOrText
+    } = req.body;
+
+    if (!appellantName?.trim() || !appellantEmail?.trim() || !reason?.trim() || !explanation?.trim()) {
+      return res.status(400).json({
+        error: "Appellant name, owner contact email, appeal reason, and detailed explanation are required."
+      });
+    }
+
+    const report = await dbService.getReportById(id);
+    if (!report) {
+      return res.status(404).json({ error: "Report not found" });
+    }
+
+    if (report.hasAppeal && report.appeal?.status === "pending") {
+      return res.status(400).json({
+        error: "An appeal for this report is already pending administrator review."
+      });
+    }
+
+    let isVerifiedSenderMatch = false;
+    if (currentUid) {
+      const currentUser = await dbService.getUserById(currentUid);
+      if (
+        currentUser?.email &&
+        report.senderEmail &&
+        currentUser.email.toLowerCase().trim() === report.senderEmail.toLowerCase().trim()
+      ) {
+        isVerifiedSenderMatch = true;
+      }
+    }
+
+    const appeal: ReportAppeal = {
+      appellantName: appellantName.trim(),
+      appellantEmail: appellantEmail.trim(),
+      appellantRole: (appellantRole || "Email / Domain Owner").trim(),
+      reason: reason.trim(),
+      explanation: explanation.trim().substring(0, 5000),
+      evidenceLinksOrText: evidenceLinksOrText ? evidenceLinksOrText.trim().substring(0, 3000) : "",
+      isVerifiedSenderMatch,
+      status: "pending",
+      submittedAt: new Date().toISOString()
+    };
+
+    const updated = await dbService.updateReport(id, {
+      hasAppeal: true,
+      appeal
+    });
+
+    if (!updated) return res.status(404).json({ error: "Failed to save appeal" });
+
+    res.json({
+      success: true,
+      report: sanitizePublicReport(updated)
+    });
+  } catch (err: any) {
+    console.error("Error submitting report appeal:", err);
+    res.status(500).json({ error: "Failed to submit appeal" });
   }
 });
 
@@ -591,7 +882,7 @@ app.get("/api/admin/reports", async (req, res) => {
     const currentUid = req.session?.userId || req.headers['x-firebase-uid'] as string;
     if (!currentUid) return res.status(401).json({ error: "Unauthorized" });
     const requestingUser = await dbService.getUserById(currentUid);
-    if (!requestingUser?.isAdmin) return res.status(403).json({ error: "Forbidden: Admin privileges required" });
+    if (!isAdminUser(requestingUser)) return res.status(403).json({ error: "Forbidden: Admin privileges required" });
 
     const reports = await dbService.getAllReports();
     res.json({ reports });
@@ -606,7 +897,7 @@ app.patch("/api/admin/reports/:id", async (req, res) => {
     const currentUid = req.session?.userId || req.headers['x-firebase-uid'] as string;
     if (!currentUid) return res.status(401).json({ error: "Unauthorized" });
     const requestingUser = await dbService.getUserById(currentUid);
-    if (!requestingUser?.isAdmin) return res.status(403).json({ error: "Forbidden: Admin privileges required" });
+    if (!isAdminUser(requestingUser)) return res.status(403).json({ error: "Forbidden: Only admins can approve or moderate reports." });
 
     const { id } = req.params;
     const { status, moderationNotes } = req.body;
@@ -618,7 +909,7 @@ app.patch("/api/admin/reports/:id", async (req, res) => {
       status,
       moderationNotes: moderationNotes || "",
       reviewedAt: new Date().toISOString(),
-      reviewedBy: requestingUser.email || requestingUser.id
+      reviewedBy: requestingUser!.email || requestingUser!.id
     });
 
     if (!updated) return res.status(404).json({ error: "Report not found" });
@@ -629,12 +920,66 @@ app.patch("/api/admin/reports/:id", async (req, res) => {
   }
 });
 
+app.patch("/api/admin/reports/:id/appeal", async (req, res) => {
+  try {
+    const currentUid = req.session?.userId || req.headers['x-firebase-uid'] as string;
+    if (!currentUid) return res.status(401).json({ error: "Unauthorized" });
+    const requestingUser = await dbService.getUserById(currentUid);
+    if (!isAdminUser(requestingUser)) return res.status(403).json({ error: "Forbidden: Only admins can resolve appeals." });
+
+    const { id } = req.params;
+    const { decision, reviewNotes, deleteReport } = req.body;
+    if (!["approved", "rejected"].includes(decision)) {
+      return res.status(400).json({ error: "Decision must be 'approved' (uphold appeal) or 'rejected' (dismiss appeal)." });
+    }
+
+    const report = await dbService.getReportById(id);
+    if (!report || !report.appeal) {
+      return res.status(404).json({ error: "Report or appeal not found" });
+    }
+
+    if (decision === "approved" && deleteReport) {
+      await dbService.deleteReport(id);
+      return res.json({ success: true, deleted: true, id });
+    }
+
+    const updatedAppeal: ReportAppeal = {
+      ...report.appeal,
+      status: decision,
+      reviewNotes: reviewNotes || (decision === "approved" ? "Appeal upheld by administrator. Report removed from public directory." : "Appeal reviewed and dismissed; report remains active."),
+      reviewedBy: requestingUser!.email || requestingUser!.id,
+      reviewedAt: new Date().toISOString()
+    };
+
+    const updates: any = {
+      hasAppeal: true,
+      appeal: updatedAppeal
+    };
+
+    // If appeal is upheld ("approved"), remove report from public visibility
+    if (decision === "approved") {
+      updates.status = "rejected";
+      updates.moderationNotes = `Appeal Upheld (${requestingUser!.email}): ${updatedAppeal.reviewNotes}`;
+      updates.reviewedAt = new Date().toISOString();
+      updates.reviewedBy = requestingUser!.email || requestingUser!.id;
+    }
+
+    const updated = await dbService.updateReport(id, updates);
+    if (!updated) return res.status(404).json({ error: "Report not found" });
+
+    res.json({ success: true, report: updated });
+  } catch (err: any) {
+    console.error("Error resolving appeal:", err);
+    res.status(500).json({ error: "Failed to resolve appeal" });
+  }
+});
+
 app.delete("/api/admin/reports/:id", async (req, res) => {
   try {
     const currentUid = req.session?.userId || req.headers['x-firebase-uid'] as string;
     if (!currentUid) return res.status(401).json({ error: "Unauthorized" });
     const requestingUser = await dbService.getUserById(currentUid);
-    if (!requestingUser?.isAdmin) return res.status(403).json({ error: "Forbidden: Admin privileges required" });
+    if (!isAdminUser(requestingUser)) return res.status(403).json({ error: "Forbidden: Only admins can delete reports." });
 
     const { id } = req.params;
     const success = await dbService.deleteReport(id);
@@ -754,6 +1099,16 @@ app.get(["/auth/callback", "/auth/callback/", "/api/auth/callback", "/api/auth/c
         const salt = await bcrypt.genSalt(10);
         const passwordHash = await bcrypt.hash("google-auth-pwd-" + Math.random().toString(36), salt);
         existingUser = await dbService.createUser(email, passwordHash, name);
+      } else {
+        // Check if existing user has a pending admin invite
+        const invites = await dbService.getAdminInvites();
+        const hasInvite = invites.some(inv => inv.email.toLowerCase() === email.toLowerCase().trim());
+        if (hasInvite && !existingUser.isAdmin) {
+          const promoted = await dbService.updateUser(existingUser.id, { isAdmin: true });
+          if (promoted) existingUser = promoted;
+          await dbService.syncAdminDoc(existingUser.id, existingUser.email, true, isSuperAdminUser(existingUser));
+          await dbService.removeAdminInvite(email);
+        }
       }
       finalUserId = existingUser.id;
       safeUser = {
@@ -761,7 +1116,8 @@ app.get(["/auth/callback", "/auth/callback/", "/api/auth/callback", "/api/auth/c
         email: existingUser.email,
         name: existingUser.name,
         subscription: existingUser.subscription,
-        isAdmin: existingUser.isAdmin
+        isAdmin: isAdminUser(existingUser),
+        isSuperAdmin: isSuperAdminUser(existingUser)
       };
     } else {
       finalUserId = targetUserId;
@@ -772,7 +1128,8 @@ app.get(["/auth/callback", "/auth/callback/", "/api/auth/callback", "/api/auth/c
           email: existingUser.email,
           name: existingUser.name,
           subscription: existingUser.subscription,
-          isAdmin: existingUser.isAdmin
+          isAdmin: isAdminUser(existingUser),
+          isSuperAdmin: isSuperAdminUser(existingUser)
         };
       }
     }
