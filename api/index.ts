@@ -1,6 +1,6 @@
 import express from "express";
 import { google } from "googleapis";
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, ThinkingLevel } from "@google/genai";
 import dotenv from "dotenv";
 import cookieSession from "cookie-session";
 import bcrypt from "bcryptjs";
@@ -1446,65 +1446,101 @@ async function resolveTechnicalData(headersStr: string, bodyStr: string = "", se
     if (sDomain) verified.sender_domain = sDomain;
   }
 
-  // 2. Parse headers if present
+  // 2. Parse headers if present (handles both raw RFC headers and JSON-stringified Gmail header arrays)
   if (headersStr) {
-    const spfMatch = headersStr.match(/spf=(pass|fail|softfail|neutral|none)/i) || headersStr.match(/Received-SPF:\s*(pass|fail|softfail|neutral|none)/i);
+    let normalizedHeaders = headersStr;
+    try {
+      const trimmed = headersStr.trim();
+      if (trimmed.startsWith("[")) {
+        const parsedHeaders = JSON.parse(trimmed);
+        if (Array.isArray(parsedHeaders)) {
+          normalizedHeaders = parsedHeaders
+            .filter((h: any) => h && typeof h.name === "string" && typeof h.value === "string")
+            .map((h: any) => `${h.name}: ${h.value}`)
+            .join("\n");
+        }
+      }
+    } catch {}
+
+    const spfMatch =
+      normalizedHeaders.match(/(?:^|[\s;:])spf=(pass|fail|softfail|neutral|none)/i) ||
+      normalizedHeaders.match(/^Received-SPF:\s*(pass|fail|softfail|neutral|none)/im);
     if (spfMatch) verified.spf = spfMatch[1].toUpperCase();
 
-    const dkimMatch = headersStr.match(/dkim=(pass|fail|neutral|none)/i);
+    const dkimMatch = normalizedHeaders.match(/(?:^|[\s;:])dkim=(pass|fail|neutral|none|temperror|permerror)/i);
     if (dkimMatch) verified.dkim = dkimMatch[1].toUpperCase();
 
-    const dmarcMatch = headersStr.match(/dmarc=(pass|fail|neutral|none)/i);
+    const dmarcMatch = normalizedHeaders.match(/(?:^|[\s;:])dmarc=(pass|fail|neutral|none|bestguesspass)/i);
     if (dmarcMatch) verified.dmarc = dmarcMatch[1].toUpperCase();
 
-    const arcMatch = headersStr.match(/arc=(pass|fail|none)/i);
+    const arcMatch = normalizedHeaders.match(/(?:^|[\s;:])arc=(pass|fail|none)/i);
     if (arcMatch) verified.arc = arcMatch[1].toUpperCase();
 
-    const returnPathMatch = headersStr.match(/return-path:\s*<([^>]+)>/i);
-    if (returnPathMatch) verified.return_path = returnPathMatch[1];
+    const returnPathMatch = normalizedHeaders.match(/^return-path:\s*<?([^>\r\n]+)>?/im);
+    if (returnPathMatch) verified.return_path = returnPathMatch[1].trim();
 
-    const replyToMatch = headersStr.match(/reply-to:\s*<?([^>\r\n]+)>?/i);
+    const replyToMatch = normalizedHeaders.match(/^reply-to:\s*<?([^>\r\n]+)>?/im);
     if (replyToMatch) {
-      verified.reply_to = replyToMatch[1];
-      const rtDomain = verified.reply_to.split("@")[1]?.toLowerCase().trim();
+      verified.reply_to = replyToMatch[1].trim();
+      const rtEmailMatch = verified.reply_to.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+      const rtAddr = rtEmailMatch ? rtEmailMatch[1] : verified.reply_to;
+      const rtDomain = rtAddr.split("@")[1]?.toLowerCase().trim();
       if (verified.sender_domain !== "NOT VERIFIED" && rtDomain && rtDomain !== verified.sender_domain) {
         verified.reply_to_mismatch = true;
       }
     }
 
-    const msgIdMatch = headersStr.match(/message-id:\s*<([^>]+)>/i);
-    if (msgIdMatch) verified.message_id = msgIdMatch[1];
+    const msgIdMatch = normalizedHeaders.match(/^message-id:\s*<?([^>\r\n]+)>?/im);
+    if (msgIdMatch) verified.message_id = msgIdMatch[1].trim();
 
-    const dkimDomainMatch = headersStr.match(/header\.i=@([^\s;]+)/i) || headersStr.match(/d=([a-zA-Z0-9.\-_]+)/i);
+    const dkimDomainMatch =
+      normalizedHeaders.match(/header\.i=@([^\s;]+)/i) ||
+      normalizedHeaders.match(/header\.d=([a-zA-Z0-9.\-_]+)/i) ||
+      normalizedHeaders.match(/\bd=([a-zA-Z0-9.\-_]+)/i);
     if (dkimDomainMatch) {
       verified.dkim_domain = dkimDomainMatch[1].toLowerCase().trim();
     }
 
     // Check domain alignment
     if (verified.sender_domain !== "NOT VERIFIED" && verified.dkim_domain !== "NOT VERIFIED") {
-      verified.domain_alignment = verified.sender_domain === verified.dkim_domain || verified.sender_domain.endsWith("." + verified.dkim_domain) || verified.dkim_domain.endsWith("." + verified.sender_domain);
+      verified.domain_alignment =
+        verified.sender_domain === verified.dkim_domain ||
+        verified.sender_domain.endsWith("." + verified.dkim_domain) ||
+        verified.dkim_domain.endsWith("." + verified.sender_domain);
     }
 
     // Check attachments
-    const attachmentMatches = headersStr.match(/filename="?([^"\r\n]+)"?/gi);
+    const attachmentMatches = normalizedHeaders.match(/filename="?([^"\r\n]+)"?/gi);
     if (attachmentMatches) {
-      verified.attachments_found = attachmentMatches.map(m => m.replace(/filename="?/i, "").replace(/"$/, "").trim());
+      verified.attachments_found = attachmentMatches.map((m) =>
+        m.replace(/filename="?/i, "").replace(/"$/, "").trim()
+      );
     }
 
-    // Extract IP
-    const ipMatch = headersStr.match(/client-ip=([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})/i) ||
-                    headersStr.match(/Received: from [^\n]+\[([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})\]/i) ||
-                    headersStr.match(/\[([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})\]/);
+    // Extract IP from Authentication-Results or Received headers
+    const ipMatch =
+      normalizedHeaders.match(/client-ip=([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})/i) ||
+      normalizedHeaders.match(/designates\s+([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})/i) ||
+      normalizedHeaders.match(/sender IP is ([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})/i) ||
+      normalizedHeaders.match(/Received:\s*from [^\r\n]*\[([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})\]/i) ||
+      normalizedHeaders.match(/\[([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})\]/);
 
     if (ipMatch) {
       const candidateIp = ipMatch[1];
-      // Exclude private IP ranges
-      if (!candidateIp.startsWith("127.") && !candidateIp.startsWith("10.") && !candidateIp.startsWith("192.168.")) {
+      // Exclude private/loopback IP ranges
+      if (
+        !candidateIp.startsWith("127.") &&
+        !candidateIp.startsWith("10.") &&
+        !candidateIp.startsWith("192.168.")
+      ) {
         verified.ip = candidateIp;
         try {
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), 1800);
-          const geoRes = await fetch(`http://ip-api.com/json/${verified.ip}?fields=status,country,city,isp,as,hosting,proxy`, { signal: controller.signal });
+          const geoRes = await fetch(
+            `http://ip-api.com/json/${verified.ip}?fields=status,country,city,isp,as,hosting,proxy`,
+            { signal: controller.signal }
+          );
           clearTimeout(timeoutId);
           if (geoRes.ok) {
             const geoData = await geoRes.json();
@@ -1525,8 +1561,14 @@ async function resolveTechnicalData(headersStr: string, bodyStr: string = "", se
     }
   }
 
-  // 3. Extract and inspect embedded URLs
-  const rawUrls = (bodyStr.match(/https?:\/\/[^\s"'<>]+/gi) || []).slice(0, 15);
+  // 3. Extract and inspect embedded URLs strictly from message body
+  const rawUrls = Array.from(
+    new Set(
+      (bodyStr.match(/https?:\/\/[^\s"'<>]+/gi) || [])
+        .map((u) => u.replace(/[.,;)\]"'>]+$/, ""))
+        .filter(Boolean)
+    )
+  ).slice(0, 15);
   const shorteners = ["bit.ly", "tinyurl.com", "t.co", "is.gd", "buff.ly", "ow.ly", "cutt.ly", "shorturl.at"];
   const lookalikes = ["paypa1", "micros0ft", "amaz0n", "app1e", "g00gle", "sec-chase", "netflix-verify", "bankofamer1ca", "wellsfarg0"];
 
@@ -1534,15 +1576,15 @@ async function resolveTechnicalData(headersStr: string, bodyStr: string = "", se
     try {
       const parsed = new URL(u);
       const host = parsed.hostname.toLowerCase();
-      const isShort = shorteners.some(s => host.includes(s));
+      const isShort = shorteners.some((s) => host.includes(s));
       const isIp = /^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$/.test(host);
-      const isLook = lookalikes.some(l => host.includes(l));
+      const isLook = lookalikes.some((l) => host.includes(l));
       verified.links_found.push({
         url: u,
         domain: host,
         is_shortener: isShort,
         is_ip_host: isIp,
-        is_lookalike: isLook
+        is_lookalike: isLook,
       });
     } catch (e) {}
   }
@@ -1619,78 +1661,116 @@ function calculateRiskScore(tech: any, socialSignals: any) {
   };
 }
 
+function extractReadableAiError(err: any): string {
+  const raw = err?.message || String(err || "Unknown AI error");
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed?.error?.message) return parsed.error.message;
+  } catch {}
+  return raw;
+}
+
+async function generateWithFallback(
+  prompt: string,
+  options: { systemInstruction?: string; responseMimeType?: string } = {}
+) {
+  const ai = getAiClient();
+  const candidates: Array<{ model: string; config: any; timeoutMs: number; attempts: number }> = [
+    {
+      model: "gemini-4-hydrogen",
+      timeoutMs: 12000,
+      attempts: 1,
+      config: {
+        ...(options.systemInstruction ? { systemInstruction: options.systemInstruction } : {}),
+        ...(options.responseMimeType ? { responseMimeType: options.responseMimeType } : {}),
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+      },
+    },
+    {
+      model: "gemini-3.1-flash-lite",
+      timeoutMs: 12000,
+      attempts: 2,
+      config: {
+        ...(options.systemInstruction ? { systemInstruction: options.systemInstruction } : {}),
+        ...(options.responseMimeType ? { responseMimeType: options.responseMimeType } : {}),
+      },
+    },
+  ];
+
+  let lastError: any = null;
+  for (const candidate of candidates) {
+    for (let attempt = 1; attempt <= candidate.attempts; attempt++) {
+      try {
+        const response = await Promise.race([
+          ai.models.generateContent({
+            model: candidate.model,
+            contents: [{ parts: [{ text: prompt }] }],
+            config: candidate.config,
+          }),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error(`${candidate.model} request timed out`)), candidate.timeoutMs)
+          ),
+        ]);
+        const text = (response.text || "").trim();
+        if (!text) {
+          throw new Error(`Empty output returned by ${candidate.model}`);
+        }
+        return text;
+      } catch (err: any) {
+        lastError = err;
+        console.warn(`Model ${candidate.model} attempt ${attempt} failed:`, extractReadableAiError(err).slice(0, 180));
+        if (attempt < candidate.attempts) {
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+        }
+      }
+    }
+  }
+  throw new Error(extractReadableAiError(lastError));
+}
+
 async function analyzeEmailHelper(data: any, mode: string, uid: string) {
+  if (!process.env.GEMINI_API_KEY) {
+    throw new Error("GEMINI_API_KEY is not configured on the server. Please set it in your environment secrets.");
+  }
+
   if (mode === "INBOX_SCAN") {
     const emailList = Array.isArray(data) ? data : [data];
-    const ai = new GoogleGenAI({
-      apiKey: process.env.GEMINI_API_KEY,
-      httpOptions: { headers: { 'User-Agent': 'aistudio-build' } }
-    });
-
     const prompt = `MODE: INBOX_SCAN
 INPUT: A list of emails.
 TASK: For EACH email return: classification (Safe, Likely Safe, Suspicious, Likely Phishing, Phishing), risk_score (0–100), severity (Low, Medium, High, Critical), short_reason (max 15 words explaining the specific finding).
 OUTPUT FORMAT: JSON array of objects with keys: subject, sender, classification, risk_score, severity, short_reason.
 EMAILS: ${JSON.stringify(emailList.map(e => ({ subject: e.subject, sender_name: e.senderName, sender_email: e.senderEmail, snippet: (e.body || e.snippet || "").substring(0, 300) })))}`;
 
-    for (const m of ["gemini-2.5-flash", "gemini-3-flash-preview"]) {
-      try {
-        const response = await ai.models.generateContent({
-          model: m,
-          contents: [{ parts: [{ text: prompt }] }],
-          config: {
-            temperature: 0.2,
-            responseMimeType: "application/json"
-          }
-        });
-        const text = response.text || "";
-        return JSON.parse(text.trim().replace(/^\s*```json/m, "").replace(/```\s*$/m, ""));
-      } catch (e) {
-        console.warn(`Inbox scan failed on ${m}:`, e);
-      }
-    }
-
-    // Deterministic fallback for inbox scan
-    return emailList.map(e => ({
-      subject: e.subject,
-      sender: e.senderEmail,
-      classification: "Likely Safe",
-      risk_score: 15,
-      severity: "Low",
-      short_reason: "Standard email format; pending full deep header audit."
-    }));
+    const text = await generateWithFallback(prompt, { responseMimeType: "application/json" });
+    return JSON.parse(text.replace(/^\s*```json/m, "").replace(/```\s*$/m, ""));
   }
 
   if (mode === "REALTIME_ALERT") {
     const singleData = Array.isArray(data) ? data[0] : data;
-    const ai = new GoogleGenAI({
-      apiKey: process.env.GEMINI_API_KEY,
-      httpOptions: { headers: { 'User-Agent': 'aistudio-build' } }
-    });
     const prompt = `MODE: REALTIME_ALERT
 INPUT: subject: "${singleData.subject}", sender: "${singleData.senderEmail}", snippet: "${(singleData.body || singleData.snippet || "").substring(0, 250)}"
 TASK: Return alert_type (Safe, Warning, Danger), message (max 20 words referencing actual sender/subject), action_hint (max 10 words).
 OUTPUT: JSON object with keys: alert_type, message, action_hint.`;
 
-    try {
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: [{ parts: [{ text: prompt }] }],
-        config: { temperature: 0.2, responseMimeType: "application/json" }
-      });
-      return JSON.parse((response.text || "").trim().replace(/^\s*```json/m, "").replace(/```\s*$/m, ""));
-    } catch (e) {
-      return {
-        alert_type: "Safe",
-        message: `Received email from ${singleData.senderEmail}. No immediate critical flags.`,
-        action_hint: "Verify sender before clicking links."
-      };
-    }
+    const text = await generateWithFallback(prompt, { responseMimeType: "application/json" });
+    return JSON.parse(text.replace(/^\s*```json/m, "").replace(/```\s*$/m, ""));
   }
 
   // SINGLE_EMAIL_VIEW
   const singleData = Array.isArray(data) ? data[0] : data;
-  const cacheKey = (singleData.id || "") + "_" + (singleData.senderEmail || "") + "_" + (singleData.subject || "") + "_" + (singleData.body ? singleData.body.length : 0);
+  const cacheKey = crypto
+    .createHash("sha256")
+    .update(
+      JSON.stringify({
+        id: singleData.id || "",
+        senderName: singleData.senderName || "",
+        senderEmail: singleData.senderEmail || "",
+        subject: singleData.subject || "",
+        body: singleData.body || "",
+        headers: singleData.headers || "",
+      })
+    )
+    .digest("hex");
 
   if (emailAnalysisCache.has(cacheKey)) {
     return emailAnalysisCache.get(cacheKey)!.result;
@@ -1699,31 +1779,32 @@ OUTPUT: JSON object with keys: alert_type, message, action_hint.`;
   const technicalData = await resolveTechnicalData(singleData.headers || "", singleData.body || "", singleData.senderEmail || "");
 
   const prompt = `You are Mail Verifier AI, an elite cybersecurity and email threat forensic engine.
-Analyze this SPECIFIC individual email thoroughly and independently.
+Analyze ONLY this SPECIFIC individual email thoroughly and independently based strictly on the provided evidence.
 
 EVIDENCE PROVIDED:
 - Subject: ${JSON.stringify(singleData.subject)}
 - Sender Display Name: ${JSON.stringify(singleData.senderName)}
 - Sender Actual Email: ${JSON.stringify(singleData.senderEmail)}
-- Reply-To: ${JSON.stringify(singleData.replyTo || technicalData.reply_to || "N/A")}
+- Reply-To: ${JSON.stringify(singleData.replyTo || technicalData.reply_to || "NOT VERIFIED")}
 - Return-Path: ${JSON.stringify(technicalData.return_path)}
 - Verified Technical Status: ${JSON.stringify(technicalData)}
 - Full Email Body:
 ${singleData.body}
 
 STRICT EVIDENCE-BASED AUDIT RULES:
-1. Every statement and conclusion MUST reference the actual details, sender address, links, or text phrases from THIS email.
-2. In 'red_flags', provide an array of specific red flags. Each red flag must cite the exact evidence quote from the email and explain why it matters.
-3. In 'trust_signals', state legitimate trust signals where evidence supports them (e.g. authentic domain, valid SPF/DKIM, consistent sender).
-4. In 'missing_information', explicitly list any technical checks that could not be completed (e.g. "WHOIS domain registration date unavailable", "ARC headers not provided", "No external malware sandbox connected"). NEVER invent unverified findings.
-5. In 'summary_markdown', produce a detailed, structured, highly readable Markdown report:
-   - ### Forensic Overview (state the exact sender, domain, and message intent)
-   - ### Specific Red Flags & Detected Threat Patterns (bullet list quoting actual sentences or links from the body)
-   - ### Legitimate Signals & Technical Verification (explain cryptographic status and alignment)
-   - ### Missing & Inconclusive Information (transparently state what was not available)
-   - ### Recommended Actions (concrete, actionable security advice)
-6. Analyze social engineering tactics: urgency, fear, authority impersonation, credential harvesting, invoice fraud, BEC. Quote the exact phrases from the body that triggered each flag.
-7. Return ONLY a valid JSON object matching the requested schema. No surrounding markdown code blocks.
+1. Every statement, red flag, trust signal, and conclusion MUST be strictly derived from the exact details, sender address, headers, links, or text phrases present in THIS email. Never fabricate or assume facts not present in the evidence above.
+2. In 'red_flags', provide ONLY red flags actually supported by the email text or verified technical headers. Each red flag MUST quote exact verbatim text from the email or exact field from Verified Technical Status.
+3. In 'trust_signals', state ONLY legitimate trust signals explicitly observed in this email (e.g., valid SPF/DKIM/DMARC from Verified Technical Status, aligned domain, absence of pressure links).
+4. In 'domain_and_links.links_analyzed', include ONLY the actual URLs present in this email (see 'links_found' in Verified Technical Status). Do NOT invent any links.
+5. In 'missing_information', explicitly list technical checks that were NOT available or showed "NOT VERIFIED" in this email (e.g., unverified SPF/DKIM/DMARC if headers were missing, unavailable WHOIS domain age, no live malware sandbox).
+6. In 'summary_markdown', produce a detailed, structured Markdown report citing ONLY facts from this email:
+   - ### Forensic Overview (exact sender, domain, subject, and message intent from the body)
+   - ### Specific Red Flags & Detected Threat Patterns (quote exact sentences or links from the body; or explicitly state none were found if clean)
+   - ### Legitimate Signals & Technical Verification (exact SPF/DKIM/DMARC/alignment values from Verified Technical Status)
+   - ### Missing & Inconclusive Information (what was not verified)
+   - ### Recommended Actions (concrete security advice tailored to this specific message)
+7. Analyze social engineering tactics strictly from the email text and quote exact phrases in 'quoted_phrases'.
+8. Return ONLY a valid JSON object matching the requested schema. No surrounding markdown code blocks.
 
 EXPECTED JSON SCHEMA:
 {
@@ -1788,97 +1869,19 @@ EXPECTED JSON SCHEMA:
   "summary_markdown": "string"
 }`;
 
-  const ai = new GoogleGenAI({
-    apiKey: process.env.GEMINI_API_KEY,
-    httpOptions: { headers: { 'User-Agent': 'aistudio-build' } }
+  const rawAiText = await generateWithFallback(prompt, {
+    systemInstruction: SYSTEM_INSTRUCTION,
+    responseMimeType: "application/json",
   });
+  const parsedAiResult: any = JSON.parse(
+    rawAiText.replace(/^\s*```json/m, "").replace(/```\s*$/m, "")
+  );
 
-  const modelsToTry = ["gemini-2.5-flash", "gemini-3-flash-preview", "gemini-3.8-flash"];
-  let parsedAiResult: any = null;
-
-  for (const model of modelsToTry) {
-    try {
-      const response = await ai.models.generateContent({
-        model,
-        contents: [{ parts: [{ text: prompt }] }],
-        config: {
-          systemInstruction: SYSTEM_INSTRUCTION,
-          temperature: 0.2,
-          responseMimeType: "application/json"
-        }
-      });
-      const text = response.text || "";
-      if (text) {
-        parsedAiResult = JSON.parse(text.trim().replace(/^\s*```json/m, "").replace(/```\s*$/m, ""));
-        break;
-      }
-    } catch (e: any) {
-      console.warn(`Analysis model ${model} failed:`, e.message?.slice(0, 120));
-    }
-  }
-
-  // If AI generation failed, construct an evidence-grounded rule analysis rather than failing or returning generic text
-  if (!parsedAiResult) {
-    console.warn("AI models were unavailable; using deterministic rule engine.");
-    const bodyText = singleData.body || "";
-    const hasUrgency = /immediate|urgent|within 24 hours|account will be (suspended|closed|locked)|act now|critical/i.test(bodyText);
-    const hasCred = /password|login|verify your account|update your (details|account|billing)|confirm your identity/i.test(bodyText);
-    const hasPayment = /invoice|wire|gift card|\$\d+|payment|auto-renewal|charged/i.test(bodyText);
-
-    parsedAiResult = {
-      redFlags: [] as any[],
-      trustSignals: [] as any[],
-      sender_identity: {
-        claimed_name: singleData.senderName || "Unknown",
-        actual_email: singleData.senderEmail || "Unknown",
-        domain: technicalData.sender_domain,
-        name_email_mismatch: technicalData.reply_to_mismatch,
-        brand_impersonation: false,
-        impersonated_brand: null,
-        explanation: `Sender domain is ${technicalData.sender_domain}.`
-      },
-      domain_and_links: {
-        suspicious_links_detected: technicalData.links_found.some((l: any) => l.is_shortener || l.is_lookalike || l.is_ip_host),
-        links_analyzed: technicalData.links_found.map((l: any) => ({
-          url: l.url,
-          domain: l.domain,
-          risk: l.is_lookalike || l.is_ip_host ? "Malicious" : l.is_shortener ? "Suspicious" : "Safe",
-          note: l.is_lookalike ? "Typo-squatted domain" : l.is_shortener ? "URL shortener" : "Standard URL"
-        })),
-        homograph_or_lookalike: technicalData.links_found.some((l: any) => l.is_lookalike),
-        shorteners_used: technicalData.links_found.some((l: any) => l.is_shortener),
-        explanation: `${technicalData.links_found.length} embedded link(s) inspected.`
-      },
-      authentication_results: {
-        spf: technicalData.spf,
-        dkim: technicalData.dkim,
-        dmarc: technicalData.dmarc,
-        arc: technicalData.arc,
-        domain_alignment: technicalData.domain_alignment,
-        explanation: `SPF: ${technicalData.spf}, DKIM: ${technicalData.dkim}, DMARC: ${technicalData.dmarc}.`
-      },
-      social_engineering: {
-        urgency_tactics: hasUrgency,
-        fear_tactics: hasUrgency && /suspend|lock|freeze|police|legal/i.test(bodyText),
-        authority_impersonation: false,
-        credential_theft_attempt: hasCred,
-        payment_fraud_attempt: hasPayment,
-        invoice_scam: /invoice|renew/i.test(bodyText),
-        bec_detected: false,
-        quoted_phrases: [],
-        explanation: "Rule-based linguistic heuristics applied to message body."
-      },
-      missing_information: [
-        "External domain WHOIS creation date was not verified via live API",
-        "No sandbox detonation record available for embedded URLs"
-      ],
-      recommended_action: hasCred || hasUrgency ? "Do not click links or provide credentials. Cross-reference sender via official portal." : "Verify sender authenticity before taking action.",
-      summary_markdown: `### Security Assessment for: ${singleData.subject}\n\n**Sender:** ${singleData.senderEmail}\n\nThis message was analyzed using cryptographic header validation and structural pattern detection. ${hasUrgency ? "High urgency cues were detected in the text." : "No critical urgency pressure observed."}\n\n- **Authentication Status:** SPF (${technicalData.spf}), DKIM (${technicalData.dkim}), DMARC (${technicalData.dmarc})\n- **Domain Alignment:** ${technicalData.domain_alignment === "NOT VERIFIED" ? "Not verified" : technicalData.domain_alignment ? "Aligned" : "Mismatched"}\n- **Links Identified:** ${technicalData.links_found.length} destination(s)`
-    };
-  }
-
-  // Calculate deterministic score based on documented rules
-  const scoreData = calculateRiskScore(technicalData, parsedAiResult.social_engineering);
+  // Calculate deterministic score based strictly on parsed technical evidence + AI-verified message signals
+  const scoreData = calculateRiskScore(technicalData, {
+    ...(parsedAiResult.social_engineering || {}),
+    brand_impersonation: Boolean(parsedAiResult.sender_identity?.brand_impersonation),
+  });
 
   // Confidence calculation
   let confidenceLevel: "High" | "Medium" | "Low" = "High";
@@ -2070,46 +2073,12 @@ NEW USER QUESTION: ${question}
   `;
 
   try {
-    const modelsToTry = ["gemini-3.6-flash", "gemini-3.1-pro-preview"];
-    let responseText = "";
-    let success = false;
-    let lastError: any = null;
-
-    for (const model of modelsToTry) {
-      let attempts = 0;
-      const maxAttempts = 3;
-      while (attempts < maxAttempts && !success) {
-        try {
-          const response = await getAiClient().models.generateContent({
-            model: model,
-            contents: prompt,
-            config: {
-              systemInstruction: "You are the Mail Verifier AI Q&A Assistant. You answer questions strictly, safely, and factually regarding the selected email.",
-              temperature: 0.7,
-            }
-          });
-          responseText = response.text || "";
-          success = true;
-          break;
-        } catch (err: any) {
-          attempts++;
-          lastError = err;
-          console.warn(`Chat attempt ${attempts} failed with model ${model}:`, err.message || err);
-          if (attempts < maxAttempts) {
-            let delay = Math.pow(2, attempts) * 500;
-            if (err?.status === 429 || err?.message?.includes("429") || err?.message?.includes("RESOURCE_EXHAUSTED")) {
-              delay = 15000;
-            }
-            await new Promise((resolve) => setTimeout(resolve, delay));
-          }
-        }
-      }
-      if (success) break;
+    if (!process.env.GEMINI_API_KEY) {
+      throw new Error("GEMINI_API_KEY is not configured on the server.");
     }
-
-    if (!success) {
-      throw lastError || new Error("Failed to process chat query (all models exhausted)");
-    }
+    const responseText = await generateWithFallback(prompt, {
+      systemInstruction: "You are the Mail Verifier AI Q&A Assistant. You answer questions strictly, safely, and factually regarding the selected email.",
+    });
     res.json({ text: responseText });
   } catch (error: any) {
     console.error("Chat message error:", error);

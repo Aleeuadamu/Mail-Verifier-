@@ -176,6 +176,13 @@ export default function App() {
   });
 
   const isPremiumActive = () => {
+    if (
+      user?.isAdmin ||
+      user?.isSuperAdmin ||
+      user?.email?.toLowerCase().trim() === "adamu0533@gmail.com"
+    ) {
+      return true;
+    }
     if (!subscription) return false;
     // If the plan is not "free", check if it's expired
     if (subscription.plan !== "free") {
@@ -336,7 +343,7 @@ export default function App() {
   >("inbox");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [resultTab, setResultTab] = useState<"analysis" | "message" | "chat">(
-    "analysis",
+    "message",
   );
   const [searchQuery, setSearchQuery] = useState("");
   const [inboxLimit, setInboxLimit] = useState(30);
@@ -1031,7 +1038,13 @@ export default function App() {
       return;
     }
 
-    if (subscription.plan === "free" && subscription.usage >= 50) {
+    const hasAdminPrivilege = Boolean(
+      user?.isAdmin ||
+      user?.isSuperAdmin ||
+      user?.email?.toLowerCase().trim() === "adamu0533@gmail.com"
+    );
+
+    if (!hasAdminPrivilege && subscription.plan === "free" && subscription.usage >= 50) {
       setShowUpgradePrompt("Unlimited AI Email Audits");
       return;
     }
@@ -1251,6 +1264,7 @@ export default function App() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          ...(user?.id ? { "x-firebase-uid": user.id } : {}),
         },
         body: JSON.stringify({
           messageContext: {
@@ -1359,18 +1373,16 @@ export default function App() {
       },
     ]);
     setFormData(analysisData);
+    setAnalysisError(null);
     setSenderCommunityWarning(null);
     checkSenderCommunityReport(analysisData.senderEmail);
     if ((msg as any).fullAnalysis) {
       setResult((msg as any).fullAnalysis);
-      setResultTab("analysis");
-      setView("result");
     } else {
-      setResult(null); // Clear previous analysis
-      setResultTab("analysis"); // Default to analysis view so user immediately sees threat insights!
-      setView("result"); // Change view immediately
-      handleAnalyze(analysisData);
+      setResult(null);
     }
+    setResultTab("message"); // Open Message view first so users can read the email before clicking Analysis
+    setView("result");
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -3051,59 +3063,51 @@ export default function App() {
                   </div>
                 )}
 
-                {isAnalyzing && !result ? (
-                  <div className="py-20 flex flex-col items-center gap-6">
-                    <div className="relative">
-                      <div className="w-20 h-20 border-4 border-navy/5 rounded-full" />
-                      <div className="absolute inset-0 border-4 border-transparent border-t-orange rounded-full animate-spin" />
-                    </div>
-                    <div className="text-center space-y-2">
-                      <p className="text-sm font-black uppercase tracking-[5px] text-orange">
-                        Ai Analysing
-                      </p>
-                      <p className="text-[10px] font-medium text-navy/30 italic">
-                        {loadingTexts[loadingStep]}
-                      </p>
-                    </div>
+                <div className="space-y-6">
+                  {/* Tabs */}
+                  <div className="flex w-full bg-navy/5 p-1.5 rounded-2xl gap-1.5">
+                    <button
+                      onClick={() => setResultTab("message")}
+                      className={cn(
+                        "flex-1 py-3 px-2 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer",
+                        resultTab === "message"
+                          ? "bg-white text-navy shadow-sm"
+                          : "text-navy/50 hover:text-navy hover:bg-white/50",
+                      )}
+                    >
+                      <Mail className="w-3.5 h-3.5" />
+                      <span>Message</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        setResultTab("analysis");
+                        if (!result && !isAnalyzing && (formData.senderEmail || formData.body || formData.subject)) {
+                          handleAnalyze(formData);
+                        }
+                      }}
+                      className={cn(
+                        "flex-1 py-3 px-2 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer",
+                        resultTab === "analysis"
+                          ? "bg-gradient-to-r from-orange via-amber-500 to-rose-500 text-white shadow-lg shadow-orange/30 ring-2 ring-orange/20"
+                          : "bg-gradient-to-r from-orange/15 via-amber-500/15 to-rose-500/15 text-orange border border-orange/35 hover:from-orange/25 hover:via-amber-500/25 hover:to-rose-500/25 hover:border-orange/60 shadow-xs",
+                      )}
+                    >
+                      <Sparkles className={cn("w-3.5 h-3.5", resultTab === "analysis" ? "text-white" : "text-orange")} />
+                      <span>Analysis</span>
+                    </button>
+                    <button
+                      onClick={() => setResultTab("chat")}
+                      className={cn(
+                        "flex-1 py-3 px-2 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer",
+                        resultTab === "chat"
+                          ? "bg-white text-navy shadow-sm"
+                          : "text-navy/50 hover:text-navy hover:bg-white/50",
+                      )}
+                    >
+                      <Shield className="w-3.5 h-3.5" />
+                      <span>AI Support</span>
+                    </button>
                   </div>
-                ) : (
-                  <div className="space-y-6">
-                    {/* Tabs */}
-                    <div className="flex w-full bg-navy/5 p-1 rounded-2xl">
-                      <button
-                        onClick={() => setResultTab("message")}
-                        className={cn(
-                          "flex-1 py-3 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all",
-                          resultTab === "message"
-                            ? "bg-white text-navy shadow-sm"
-                            : "text-navy/40 hover:text-navy",
-                        )}
-                      >
-                        Message
-                      </button>
-                      <button
-                        onClick={() => setResultTab("analysis")}
-                        className={cn(
-                          "flex-1 py-3 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all",
-                          resultTab === "analysis"
-                            ? "bg-white text-navy shadow-sm"
-                            : "text-navy/40 hover:text-navy",
-                        )}
-                      >
-                        Analysis
-                      </button>
-                      <button
-                        onClick={() => setResultTab("chat")}
-                        className={cn(
-                          "flex-1 py-3 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all",
-                          resultTab === "chat"
-                            ? "bg-white text-navy shadow-sm"
-                            : "text-navy/40 hover:text-navy",
-                        )}
-                      >
-                        AI Support
-                      </button>
-                    </div>
 
                     {resultTab === "message" && (
                       <div className="space-y-6 animate-in fade-in">
@@ -3218,12 +3222,45 @@ export default function App() {
                         <div className="bg-white p-6 rounded-3xl border border-navy/10 space-y-4 shadow-sm whitespace-pre-wrap text-sm text-navy/80 leading-relaxed font-medium overflow-hidden">
                           {formData.body}
                         </div>
+
+                        <div className="flex justify-end">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setResultTab("analysis");
+                              if (!result && !isAnalyzing && (formData.senderEmail || formData.body || formData.subject)) {
+                                handleAnalyze(formData);
+                              }
+                            }}
+                            className="px-6 py-3.5 bg-gradient-to-r from-orange via-amber-500 to-rose-500 hover:brightness-105 text-white font-display font-black text-xs uppercase tracking-wider rounded-2xl shadow-lg shadow-orange/25 transition-all flex items-center gap-2 cursor-pointer"
+                          >
+                            <Sparkles className="w-4 h-4" />
+                            <span>{result ? "View Threat Analysis" : "Analyze This Email"}</span>
+                          </button>
+                        </div>
                       </div>
                     )}
 
                     {resultTab === "analysis" && (
                       <div className="space-y-6 animate-in fade-in">
-                        {isAnalyzing && (
+                        {isAnalyzing && !result && (
+                          <div className="py-16 bg-white border border-navy/10 rounded-[2.5rem] flex flex-col items-center gap-6 shadow-sm">
+                            <div className="relative">
+                              <div className="w-20 h-20 border-4 border-navy/5 rounded-full" />
+                              <div className="absolute inset-0 border-4 border-transparent border-t-orange rounded-full animate-spin" />
+                            </div>
+                            <div className="text-center space-y-2 px-4">
+                              <p className="text-sm font-black uppercase tracking-[5px] text-orange">
+                                Ai Analysing
+                              </p>
+                              <p className="text-[11px] font-medium text-navy/40 italic">
+                                {loadingTexts[loadingStep]}
+                              </p>
+                            </div>
+                          </div>
+                        )}
+
+                        {isAnalyzing && result && (
                           <div className="flex items-center gap-3 p-4 bg-orange/10 text-orange rounded-2xl">
                             <Loader2 className="w-4 h-4 animate-spin" />
                             <span className="text-[10px] font-black uppercase tracking-widest">
@@ -3263,14 +3300,31 @@ export default function App() {
                                 {formData.subject || "(No Subject)"}
                               </p>
                               <p className="text-[9px] text-orange font-bold uppercase tracking-widest">
-                                Sender Verification Record Present
+                                {result
+                                  ? `SPF: ${result?.authentication_results?.spf_record || "N/A"} • DKIM: ${result?.authentication_results?.dkim_signature || "N/A"}`
+                                  : formData.headers
+                                  ? "Message Headers Extracted"
+                                  : "Awaiting Analysis"}
                               </p>
                             </div>
                           </div>
                         </div>
 
+                        {/* Subscription Gate / Free Limit Fallback so Analysis Page is NEVER Empty */}
+                        {!isAnalyzing && !result && !isPremiumActive() && (
+                          <div className="bg-white border border-navy/10 rounded-[2.5rem] shadow-sm">
+                            {renderSubscriptionGate("AI Email Threat Audit")}
+                          </div>
+                        )}
+
+                        {!isAnalyzing && !result && isPremiumActive() && subscription.plan === "free" && subscription.usage >= 50 && !user?.isAdmin && !user?.isSuperAdmin && user?.email?.toLowerCase().trim() !== "adamu0533@gmail.com" && (
+                          <div className="bg-white border border-navy/10 rounded-[2.5rem] shadow-sm">
+                            {renderSubscriptionGate("Unlimited AI Email Audits")}
+                          </div>
+                        )}
+
                         {/* Analysis Error / Incomplete Analysis State */}
-                        {analysisError && !result && (
+                        {!isAnalyzing && analysisError && !result && (
                           <div className="bg-white border-2 border-dashed border-red-200 rounded-[2.5rem] p-8 md:p-12 text-center space-y-4">
                             <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto">
                               <AlertTriangle className="w-8 h-8" />
@@ -3289,6 +3343,30 @@ export default function App() {
                             >
                               <RefreshCw className="w-4 h-4" />
                               Retry Evidence Analysis
+                            </button>
+                          </div>
+                        )}
+
+                        {/* Idle / Ready-to-Analyze Fallback so Analysis Page is NEVER Empty */}
+                        {!isAnalyzing && !analysisError && !result && isPremiumActive() && (
+                          <div className="bg-white border-2 border-dashed border-orange/30 rounded-[2.5rem] p-8 md:p-12 text-center space-y-4">
+                            <div className="w-16 h-16 bg-gradient-to-br from-orange/20 to-rose-500/20 text-orange rounded-full flex items-center justify-center mx-auto">
+                              <Sparkles className="w-8 h-8" />
+                            </div>
+                            <div className="space-y-2 max-w-md mx-auto">
+                              <h3 className="text-lg font-display font-black uppercase tracking-tight text-navy">
+                                Forensic Threat Audit Ready
+                              </h3>
+                              <p className="text-xs text-navy/60 leading-relaxed font-medium">
+                                Run deep header verification, domain alignment inspection, and social engineering analysis on this message.
+                              </p>
+                            </div>
+                            <button
+                              onClick={() => handleAnalyze(formData)}
+                              className="px-6 py-3.5 bg-gradient-to-r from-orange via-amber-500 to-rose-500 text-white rounded-2xl text-xs font-black uppercase tracking-wider hover:brightness-105 transition-all cursor-pointer inline-flex items-center gap-2 shadow-lg shadow-orange/25"
+                            >
+                              <Sparkles className="w-4 h-4" />
+                              Start Forensic Analysis
                             </button>
                           </div>
                         )}
@@ -3876,7 +3954,6 @@ export default function App() {
                       </div>
                     )}
                   </div>
-                )}
               </motion.div>
             )}
 
@@ -4155,74 +4232,6 @@ export default function App() {
                     </p>
                   </div>
                 </div>
-
-                {/* Universal Upgrade Prompt Modal Overlay */}
-                {showUpgradePrompt && (
-                  <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-navy/60 backdrop-blur-md">
-                    <motion.div 
-                      initial={{ scale: 0.95, opacity: 0 }}
-                      animate={{ scale: 1, opacity: 1 }}
-                      className="bg-white rounded-[3rem] border border-navy/10 shadow-2xl p-8 max-w-md w-full relative overflow-hidden space-y-6 text-center"
-                    >
-                      <button 
-                        onClick={() => setShowUpgradePrompt(null)}
-                        className="absolute top-6 right-6 p-2 bg-navy/5 rounded-full hover:bg-navy/10 text-navy transition-colors cursor-pointer"
-                      >
-                        <X className="w-4 h-4" />
-                      </button>
-
-                      <div className="flex flex-col items-center space-y-4">
-                        <div className="relative flex justify-center">
-                          <div className="absolute inset-0 bg-orange/20 blur-2xl rounded-full" />
-                          <div className="bg-navy p-6 rounded-[2rem] relative border border-orange/10 flex items-center justify-center">
-                            <Sparkles className="w-10 h-10 text-orange" />
-                          </div>
-                        </div>
-
-                        <div className="space-y-2">
-                          <span className="bg-orange/10 text-orange px-3.5 py-1 rounded-full text-[9px] font-black uppercase tracking-[2px] border border-orange/20">
-                            Premium Access Blocked
-                          </span>
-                          <h3 className="text-2xl font-display font-black uppercase italic tracking-tight text-navy">
-                            UNLOCK {showUpgradePrompt.toUpperCase()}
-                          </h3>
-                          <p className="text-xs text-navy/60 font-semibold leading-relaxed max-w-xs mx-auto">
-                            The requested secure tool is only available for active Premium defenders. Free trial is either uninitiated or expired. Upgrade now to secure your inbox with limitless real-time scanning.
-                          </p>
-                        </div>
-                      </div>
-
-                      <div className="flex flex-col gap-2 pt-2">
-                        <button
-                          onClick={() => {
-                            setShowUpgradePrompt(null);
-                            setView("subscription");
-                            initiateCheckout("pro");
-                          }}
-                          className="w-full bg-navy text-orange hover:bg-navy/95 py-4 rounded-2xl font-black uppercase tracking-widest text-xs transition-all shadow-xl shadow-navy/10 flex items-center justify-center gap-2 cursor-pointer"
-                        >
-                          <Zap className="w-4 h-4 text-orange fill-current" />
-                          Subscribe & Upgrade Now
-                        </button>
-                        <button
-                          onClick={() => {
-                            setShowUpgradePrompt(null);
-                            setView("subscription");
-                          }}
-                          className="w-full bg-navy/5 text-navy hover:bg-navy/10 py-3.5 rounded-2xl font-black uppercase tracking-widest text-[10px] transition-all cursor-pointer"
-                        >
-                          View Plan Benefits
-                        </button>
-                        <button
-                          onClick={() => setShowUpgradePrompt(null)}
-                          className="w-full text-navy/40 hover:text-navy/60 py-2 text-[9px] font-black uppercase tracking-widest transition-colors cursor-pointer"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </motion.div>
-                  </div>
-                )}
 
                 {/* Majestic Live Ticking Countdown Terminal */}
                 {getLiveCountdown() && (
@@ -4565,6 +4574,74 @@ export default function App() {
             )}
           </AnimatePresence>
         </main>
+
+        {/* Global Universal Upgrade Prompt Modal Overlay */}
+        {showUpgradePrompt && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-navy/60 backdrop-blur-md">
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              className="bg-white rounded-[3rem] border border-navy/10 shadow-2xl p-8 max-w-md w-full relative overflow-hidden space-y-6 text-center"
+            >
+              <button 
+                onClick={() => setShowUpgradePrompt(null)}
+                className="absolute top-6 right-6 p-2 bg-navy/5 rounded-full hover:bg-navy/10 text-navy transition-colors cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+
+              <div className="flex flex-col items-center space-y-4">
+                <div className="relative flex justify-center">
+                  <div className="absolute inset-0 bg-orange/20 blur-2xl rounded-full" />
+                  <div className="bg-navy p-6 rounded-[2rem] relative border border-orange/10 flex items-center justify-center">
+                    <Sparkles className="w-10 h-10 text-orange" />
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <span className="bg-orange/10 text-orange px-3.5 py-1 rounded-full text-[9px] font-black uppercase tracking-[2px] border border-orange/20">
+                    Premium Access Blocked
+                  </span>
+                  <h3 className="text-2xl font-display font-black uppercase italic tracking-tight text-navy">
+                    UNLOCK {showUpgradePrompt.toUpperCase()}
+                  </h3>
+                  <p className="text-xs text-navy/60 font-semibold leading-relaxed max-w-xs mx-auto">
+                    The requested secure tool is only available for active Premium defenders. Free trial is either uninitiated or expired. Upgrade now to secure your inbox with limitless real-time scanning.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-2 pt-2">
+                <button
+                  onClick={() => {
+                    setShowUpgradePrompt(null);
+                    setView("subscription");
+                    initiateCheckout("pro");
+                  }}
+                  className="w-full bg-navy text-orange hover:bg-navy/95 py-4 rounded-2xl font-black uppercase tracking-widest text-xs transition-all shadow-xl shadow-navy/10 flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Zap className="w-4 h-4 text-orange fill-current" />
+                  Subscribe & Upgrade Now
+                </button>
+                <button
+                  onClick={() => {
+                    setShowUpgradePrompt(null);
+                    setView("subscription");
+                  }}
+                  className="w-full bg-navy/5 text-navy hover:bg-navy/10 py-3.5 rounded-2xl font-black uppercase tracking-widest text-[10px] transition-all cursor-pointer"
+                >
+                  View Plan Benefits
+                </button>
+                <button
+                  onClick={() => setShowUpgradePrompt(null)}
+                  className="w-full text-navy/40 hover:text-navy/60 py-2 text-[9px] font-black uppercase tracking-widest transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
 
         {/* Persistent Bottom Nav (Mobile/Web App style) */}
         {view !== "login" && (
